@@ -4,13 +4,17 @@
 
 > 这是个人实验项目，与 Apple、ICCOA 智慧车联开放联盟及汽车制造商无关联，未获得 MFi 认证。请在停车状态下完成配对、配置和测试。详见 [免责声明](DISCLAIMER.md)。
 
-## 开发状态
+## 下载与安装
 
-当前开发版本为 **1.2.48**。项目仍在测试和修复问题，暂无公开安装包。[GitHub Releases](https://github.com/As-Care/CarPToCarICCOA/releases) 暂为空。
+最新版本为 **1.2.48**（经实车验证可用）。
+
+> **下载链接**：**[`CarPToCar+ICCOA.apk`](https://github.com/As-Care/CarPToCarICCOA/raw/release/CarPToCar+ICCOA.apk)**  
+> 历史版本与标签见 [GitHub Releases](https://github.com/As-Care/CarPToCarICCOA/releases)。
 
 | 项目 | 说明 |
 | --- | --- |
 | 应用包名 | `io.github.shaonialife.carptocar.carplus` |
+| 安装包名 | `CarPToCar+ICCOA.apk`（版本：`1.2.48`） |
 | 手机 | 内置系统 Car+ 且可向本应用授予 **Root** 的一加手机 |
 | Android 版本 | 应用最低要求 Android 12。单机 Car+ 已在 ColorOS 17 的一加手机上测试，其他系统和机型的兼容性待验证。 |
 | 接收端 | 支持无线 CarPlay 的车机，已在奥迪 MIB3 实车和 Mac 版 AllPlay 测试台验证链路。 |
