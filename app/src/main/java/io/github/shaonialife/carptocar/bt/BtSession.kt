@@ -24,6 +24,7 @@ internal fun Iap2LinkChannel.runSenderSession(
     /** 保活泵退出（链路断开）回调——用于释放主控的「会话处理中」互斥，见调用处注释。 */
     onLinkClosed: () -> Unit = {},
     remoteDevice: BluetoothDevice?,
+    linkTimeoutMillis: Long = timeoutMillis,
 ) {
     // 蓝牙列表里的名字先修一遍：MagicOS 在本地蓝牙名未设置时会把「未知设备」当成
     // 适配器名，车机屏幕上就出现「未知设备 / 已连接」。
@@ -43,14 +44,14 @@ internal fun Iap2LinkChannel.runSenderSession(
             this,
             { line -> log(line) },
             resolveBluetoothMac(context, log),
-            onWifiCredentials,
+            { onWifiCredentials(it.copy(bluetoothPeer = peer)) },
             { onEndpointUpdate(it.copy(bluetoothPeer = peer)) },
             // MFi 挑战长度按车机身份持久化（省掉 20B 静默 6 秒的试探）
             context.applicationContext,
             nowPlayingProvider,
         )
     try {
-        val endpoint = session.run(timeoutMillis)
+        val endpoint = session.run(timeoutMillis, linkTimeoutMillis)
         onEndpoint(endpoint.copy(bluetoothPeer = peer))
         // Phase 2 过渡：保持控制通道存活记录配件消息；AirPlay 配对由 onEndpoint 回调发起
         onSessionReady(session)

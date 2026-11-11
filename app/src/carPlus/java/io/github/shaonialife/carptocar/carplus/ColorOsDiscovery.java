@@ -47,6 +47,7 @@ public final class ColorOsDiscovery {
     private volatile boolean advertising;
     private volatile long advertisementEpoch;
     private volatile boolean closing;
+    private volatile boolean stopNative;
     private long lastScanAt = -10_000;
     private int sequence = (int) SystemClock.elapsedRealtimeNanos() & 255;
 
@@ -81,6 +82,10 @@ public final class ColorOsDiscovery {
             try (BufferedReader control = new BufferedReader(new InputStreamReader(System.in, StandardCharsets.US_ASCII))) {
                 String command;
                 while ((command = control.readLine()) != null) {
+                    if ("stop-native".equals(command)) {
+                        stopNative = true;
+                        break;
+                    }
                     if ("reconnect".equals(command)) requests.execute(() -> reconnectInBackground(0));
                 }
             } catch (Exception ignored) {
@@ -103,6 +108,14 @@ public final class ColorOsDiscovery {
         } finally {
             requests.shutdownNow();
             logcat.destroy();
+            if (stopNative) {
+                int pid = relay.releaseNativeProcess();
+                if (pid > 0 && activeEpoch(false) == 0 && !guideIsVisible()
+                        && NATIVE_PROCESS.equals(processName(pid))) {
+                    android.os.Process.killProcess(pid);
+                    System.out.println("ColorOS: stopped the local ICCOA connection process " + pid);
+                }
+            }
         }
     }
 

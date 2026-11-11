@@ -10,6 +10,7 @@ import org.json.JSONObject
 /** One snapshot per actual Bluetooth peer, keyed by address so device renames cannot duplicate it. */
 internal object CarPlusResolutionHistory {
     data class Entry(
+        val address: String,
         val name: String,
         val width: Int,
         val height: Int,
@@ -33,17 +34,15 @@ internal object CarPlusResolutionHistory {
         preferences(context).edit().putString(peer.address.uppercase(Locale.ROOT), entry.toString()).apply()
     }
 
-    fun get(context: Context, address: String): Entry? =
-        decode(preferences(context).getString(address.uppercase(Locale.ROOT), null))
-
     fun entries(context: Context): List<Entry> =
-        preferences(context).all.values.mapNotNull { decode(it as? String) }.sortedByDescending { it.connectedAt }
+        preferences(context).all.mapNotNull { (address, value) -> decode(address, value as? String) }
+            .sortedByDescending { it.connectedAt }
 
-    private fun decode(value: String?): Entry? {
+    private fun decode(address: String, value: String?): Entry? {
         if (value == null) return null
         return runCatching {
             val json = JSONObject(value)
-            Entry(json.getString("name"), json.getInt("width"), json.getInt("height"), json.getLong("connectedAt"))
+            Entry(address, json.getString("name"), json.getInt("width"), json.getInt("height"), json.getLong("connectedAt"))
         }.getOrNull()
     }
 }

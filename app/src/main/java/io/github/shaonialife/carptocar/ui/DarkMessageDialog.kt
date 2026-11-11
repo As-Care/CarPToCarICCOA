@@ -1,12 +1,10 @@
 package io.github.shaonialife.carptocar.ui
 
 import android.app.Activity
-import android.graphics.drawable.GradientDrawable
 import android.view.Gravity
 import android.view.LayoutInflater
 import android.view.ViewGroup
 import android.widget.LinearLayout
-import android.widget.ScrollView
 import android.widget.TextView
 import androidx.appcompat.app.AlertDialog
 import io.github.shaonialife.carptocar.R
@@ -29,7 +27,7 @@ object DarkMessageDialog {
         /** 文字按钮（bg_tbtn）。 */
         TEXT,
 
-        /** 危险操作（暗红底）。 */
+        /** 危险操作（红色描边）。 */
         DANGER,
     }
 
@@ -60,7 +58,6 @@ object DarkMessageDialog {
         val view = LayoutInflater.from(activity).inflate(R.layout.dialog_message, null)
         val titleView = view.findViewById<TextView>(R.id.msgTitle)
         val bodyView = view.findViewById<TextView>(R.id.msgBody)
-        val scroll = view.findViewById<ScrollView>(R.id.msgScroll)
         val actionRow = view.findViewById<LinearLayout>(R.id.msgActions)
         titleView.text = title
         bodyView.text = message
@@ -90,28 +87,7 @@ object DarkMessageDialog {
         if (cancelable) {
             dialog.setOnCancelListener { onCancel?.invoke() }
         }
-        dialog.setOnShowListener {
-            // 正文超长时夹到屏高 46% 并内部滚动；短文案贴合内容（固定高度会留大片空白）。
-            // clampBody 同时作为旋转回调：横屏屏高变小后要重新夹紧，否则会撑出屏幕。
-            val clampBody: (Activity) -> Unit = { ctx ->
-                val maxBodyHeight = (ctx.resources.displayMetrics.heightPixels * 0.46f).toInt()
-                bodyView.post {
-                    val target =
-                        if (bodyView.height > maxBodyHeight) {
-                            maxBodyHeight
-                        } else {
-                            ViewGroup.LayoutParams.WRAP_CONTENT
-                        }
-                    if (scroll.layoutParams.height != target) {
-                        scroll.layoutParams =
-                            scroll.layoutParams.apply { height = target }
-                    }
-                }
-            }
-            // 宽度 92%、高度按内容自适应；旋转时 PanelWindow 会回调 clampBody 重算
-            PanelWindow.apply(dialog, activity, onResize = clampBody)
-            clampBody(activity)
-        }
+        PanelWindow.apply(dialog, activity)
         dialog.show()
         return dialog
     }
@@ -139,13 +115,8 @@ object DarkMessageDialog {
                 }
 
                 Emphasis.DANGER -> {
-                    // 危险动作：暗红底 + 浅红字（复用错误容器色）
-                    background =
-                        GradientDrawable().apply {
-                            cornerRadius = 999f * density
-                            setColor(activity.getColor(R.color.m3_err_container))
-                        }
-                    setTextColor(activity.getColor(R.color.m3_on_err_container))
+                    background = activity.getDrawable(R.drawable.bg_cta_outline_err)
+                    setTextColor(activity.getColor(R.color.m3_error))
                 }
 
                 Emphasis.TEXT -> {

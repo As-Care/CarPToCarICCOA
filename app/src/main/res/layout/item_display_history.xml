@@ -48,12 +48,13 @@
             android:layout_width="wrap_content"
             android:layout_height="wrap_content"
             android:layout_marginStart="10dp"
-            android:minHeight="48dp"
+            android:minHeight="36dp"
             android:minWidth="72dp"
             android:paddingHorizontal="10dp"
-            android:background="@drawable/bg_action_btn"
+            android:paddingVertical="4dp"
+            android:background="@drawable/bg_btn_compact"
             android:text="@string/display_history_fill"
-            android:textColor="@color/m3_primary"
+            android:textColor="@color/m3_on_sec_container"
             android:textSize="12sp"
             android:textStyle="bold" />
     </LinearLayout>

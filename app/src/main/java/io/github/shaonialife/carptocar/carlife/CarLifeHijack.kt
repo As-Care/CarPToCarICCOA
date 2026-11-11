@@ -396,14 +396,6 @@ object CarLifeHijack {
     val isActive: Boolean get() = running.get() && client?.isRunning == true
 
     /**
-     * 把一条车机定位转给 CarLife+（0x18010）。
-     *
-     * 由 [SessionController] 在 iAP2 0xFFFB（LocationInformation）到达时调用；
-     * 未接管 / 引擎未连上时返回 false，调用方按「本轮没有车机定位」处理即可。
-     */
-    fun sendCarGps(fix: CarGpsFix): Boolean = client?.sendCarGps(fix) ?: false
-
-    /**
      * 车机语音键 → CarLife 硬键（0x68008）。
      *
      * [keycode] 取 [CarLifeProtocol.HardKey.VR_START]（起识别）或

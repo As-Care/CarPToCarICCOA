@@ -2,6 +2,7 @@ package io.github.shaonialife.carptocar.launcher.settings
 
 import android.content.Context
 import io.github.shaonialife.carptocar.carplus.CarPlusVideo
+import java.util.Locale
 
 /**
  * 「显示」面板偏好：视频流/虚拟屏的分辨率缩放与目标帧率。
@@ -135,20 +136,44 @@ object DisplayPrefs {
             .apply()
     }
 
-    internal fun carPlusStreamSize(context: Context): CarPlusVideo.Size? {
+    internal fun carPlusStreamSize(context: Context, address: String?): CarPlusVideo.Size? {
+        val key = address?.uppercase(Locale.ROOT) ?: return null
         val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
         return CarPlusVideo.manualSize(
-            prefs.getInt(KEY_ICCOA_WIDTH, 0),
-            prefs.getInt(KEY_ICCOA_HEIGHT, 0),
+            prefs.getInt("${KEY_ICCOA_WIDTH}_$key", 0),
+            prefs.getInt("${KEY_ICCOA_HEIGHT}_$key", 0),
         )
     }
 
-    internal fun setCarPlusStreamSize(context: Context, size: CarPlusVideo.Size?) {
+    internal fun setCarPlusStreamSize(context: Context, address: String, size: CarPlusVideo.Size?) {
+        val key = address.uppercase(Locale.ROOT)
+        val widthKey = "${KEY_ICCOA_WIDTH}_$key"
+        val heightKey = "${KEY_ICCOA_HEIGHT}_$key"
         val edit = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE).edit()
         if (size == null) {
-            edit.remove(KEY_ICCOA_WIDTH).remove(KEY_ICCOA_HEIGHT)
+            edit.remove(widthKey).remove(heightKey)
         } else {
-            edit.putInt(KEY_ICCOA_WIDTH, size.width).putInt(KEY_ICCOA_HEIGHT, size.height)
+            edit.putInt(widthKey, size.width).putInt(heightKey, size.height)
+        }
+        edit.apply()
+    }
+
+    /** Carry the previous global size to the selected receiver once, during upgrade. */
+    internal fun migrateCarPlusStreamSize(context: Context, selectedAddress: String?) {
+        val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        if (!prefs.contains(KEY_ICCOA_WIDTH) && !prefs.contains(KEY_ICCOA_HEIGHT)) return
+        val oldSize = CarPlusVideo.manualSize(
+            prefs.getInt(KEY_ICCOA_WIDTH, 0),
+            prefs.getInt(KEY_ICCOA_HEIGHT, 0),
+        )
+        val edit = prefs.edit().remove(KEY_ICCOA_WIDTH).remove(KEY_ICCOA_HEIGHT)
+        if (selectedAddress != null && oldSize != null) {
+            val key = selectedAddress.uppercase(Locale.ROOT)
+            val widthKey = "${KEY_ICCOA_WIDTH}_$key"
+            val heightKey = "${KEY_ICCOA_HEIGHT}_$key"
+            if (!prefs.contains(widthKey) && !prefs.contains(heightKey)) {
+                edit.putInt(widthKey, oldSize.width).putInt(heightKey, oldSize.height)
+            }
         }
         edit.apply()
     }

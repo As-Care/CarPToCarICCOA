@@ -8,7 +8,6 @@ import io.github.shaonialife.carptocar.iap2.Iap2LinkEngine
 import io.github.shaonialife.carptocar.iap2.Iap2MessageIds
 import io.github.shaonialife.carptocar.iap2.Iap2NowPlaying
 import io.github.shaonialife.carptocar.iap2.MfiLengthMemory
-import io.github.shaonialife.carptocar.iap2.NmeaLocation
 import io.github.shaonialife.carptocar.input.ConsumerKeys
 import io.github.shaonialife.carptocar.util.SessionTrace
 import java.security.SecureRandom
@@ -810,24 +809,6 @@ class VirtualIap2Link(
                 fireHidKeysLocked(usages)
             }
 
-            ids.LOCATION_INFORMATION -> {
-                // 车机定位样本（~1Hz）。以前这条落进「未处理的 CSM」分支，日志里只有
-                // 一行 hex，既看不出是不是坐标、也白白刷满 20 条上限。
-                //
-                // 注意：**必须继续让引擎回链路 ACK**（漏 ACK 车机 ~10s 后关控制通道），
-                // 这条分支只做观测量解析，不改变应答行为。
-                val sentences = NmeaLocation.splitSentences(frame.body)
-                locationFrames++
-                if (locationFrames <= 3 || locationFrames % 60 == 0) {
-                    log(
-                        "IAPLINK: 车机定位样本 #$locationFrames " +
-                            (sentences.joinToString(" | ").ifEmpty { "（报文体里没有 ASCII 句子）" }) +
-                            " 原始=" + frame.body.joinToString(" ") { "%02x".format(it) }.take(80),
-                    )
-                }
-                if (sentences.isNotEmpty()) onLocationSamples?.invoke(sentences)
-            }
-
             else -> {
                 // 未处理的消息也留痕：车机若用非常规 ID 下发媒体键/按键，这里能第一时间
                 // 在日志里看到对应消息号（切歌按键排查的关键观测点）。
@@ -926,8 +907,6 @@ class VirtualIap2Link(
             DEVICE_INFORMATION_UPDATE,
             Iap2Csm.param(0, "iPhone".toByteArray(Charsets.UTF_8)),
         )
-        sendRawCsmLocked(MIB3_START_LOCATION_INFORMATION)
-        sendRawCsmLocked(MIB3_GPRMC_DATA_STATUS)
         log("IAPLINK: MIB3 突发已发（会话标识 $sessionId）——等待车机订阅")
     }
 
@@ -1013,17 +992,6 @@ class VirtualIap2Link(
      */
     var onHidKeysReleased: ((Set<Int>) -> Unit)? = null
 
-    /**
-     * 引擎回调：车机定位样本（0xFFFB LocationInformation）里的 NMEA 句子。
-     *
-     * 车机每秒推一条，报文体是 `[len][id=0][ASCII]`，可能是 `$PASCD`（奥迪，无经纬度）
-     * 也可能是标准 `$GPGGA/$GPRMC/$GPGSA`（有经纬度）。解析在 [NmeaLocation]，
-     * 这里只负责「把句子捞出来交出去」并做低频日志，不猜任何语义。
-     */
-    var onLocationSamples: ((List<String>) -> Unit)? = null
-
-    /** 已收到的定位报文数（日志抽样用）。 */
-    private var locationFrames = 0
 
     /** 车机在 0x6800 StartHID 里给出的 HID 描述符（解析报告用；null = 未提供）。 */
     private var hidDescriptor: ByteArray? = null
@@ -1123,17 +1091,6 @@ class VirtualIap2Link(
 
         /** ---- 以下为 Frida 抓包的逐字节常量（MIB3 真机 iPhone → Audi MMI）---- */
         private val HEX_DIGITS = "0123456789abcdef"
-
-        /** 0xFFFA StartLocationInformation。 */
-        internal val MIB3_START_LOCATION_INFORMATION: ByteArray =
-            hex(
-                "40400032fffa00080000000000140004000100088001000000fa" +
-                    "0004000200088002000000fa000400040008800400000014",
-            )
-
-        /** 0xFFF0 GPRMCDataStatusValuesNotification。 */
-        internal val MIB3_GPRMC_DATA_STATUS: ByteArray =
-            hex("4040000efff00004000000040001")
 
         /** 0x5001 NowPlayingUpdate 空态（无媒体/无播放）。 */
         internal val MIB3_NOW_PLAYING_UPDATE_IDLE: ByteArray =

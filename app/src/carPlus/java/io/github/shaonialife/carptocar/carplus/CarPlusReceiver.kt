@@ -16,7 +16,6 @@ import android.view.Surface
 import io.github.shaonialife.carptocar.BuildConfig
 import io.github.shaonialife.carptocar.SessionController
 import io.github.shaonialife.carptocar.input.TouchReports.Contact
-import io.github.shaonialife.carptocar.launcher.settings.DisplayPrefs
 import io.github.shaonialife.carptocar.video.VideoSender
 import java.io.IOException
 
@@ -37,10 +36,15 @@ internal object CarPlusReceiver {
     @Volatile private var audio: CarPlusAudio? = null
     private var refreshPending = false
     private var bindingGeneration = 0
+    private var pendingStop = false
     private val replies = Messenger(Handler(main.looper) { message ->
         if (bindingContext != null && message.arg1 == bindingGeneration) {
             when (message.what) {
+                CarPlusReceiverService.STOPPED -> if (pendingStop) {
+                    unbind()
+                }
                 CarPlusReceiverService.STATUS -> {
+                    isSourceConnected = message.data.getBoolean(CarPlusReceiverService.SOURCE_CONNECTED)
                     message.data.getString(CarPlusReceiverService.STATUS_TEXT)?.let { status = it }
                     message.data.getString(CarPlusReceiverService.LOG_TEXT)?.let { SessionController.appendLog("ICCOA: $it") }
                 }
@@ -65,6 +69,9 @@ internal object CarPlusReceiver {
     }
         private set
 
+    var isSourceConnected = false
+        private set
+
     private val connection = object : ServiceConnection {
         override fun onServiceConnected(name: ComponentName, binder: IBinder) {
             if (bindingContext == null) return
@@ -79,6 +86,7 @@ internal object CarPlusReceiver {
         override fun onServiceDisconnected(name: ComponentName) {
             if (bindingContext == null) return
             receiver = null
+            isSourceConnected = false
             status = "ICCOA 接收进程已断开 · 正在恢复"
         }
 
@@ -91,6 +99,7 @@ internal object CarPlusReceiver {
     }
 
     fun start(context: Context, refresh: Boolean = false) = onMain {
+        if (pendingStop) unbind()
         if (!BuildConfig.CAR_PLUS_RUNTIME) {
             SessionController.appendLog("ICCOA: 当前 APK 使用接口存根，未打包运行时 SDK")
         } else if (receiver != null) {
@@ -234,17 +243,29 @@ internal object CarPlusReceiver {
         }
     }
 
-    fun stop() = onMain {
+    fun stop(stopNative: Boolean = false) = onMain {
         if (BuildConfig.CAR_PLUS_RUNTIME) {
             stopAudio()
             stopVideo(encodedSender)
-            send(Message.obtain(null, CarPlusReceiverService.STOP))
-            unbind()
+            val generation = bindingGeneration
+            pendingStop = stopNative && send(
+                Message.obtain(null, CarPlusReceiverService.STOP, 1, generation).apply { replyTo = replies },
+            )
+            if (pendingStop) {
+                main.postDelayed({
+                    if (pendingStop && generation == bindingGeneration) unbind()
+                }, 400L)
+            } else {
+                send(Message.obtain(null, CarPlusReceiverService.STOP))
+                unbind()
+            }
             surface = null
             scaler?.close()
             scaler = null
             touchInImage = false
             refreshPending = false
+            requestedCanvas = null
+            isSourceConnected = false
             status = "ICCOA 接收端已停止 · 点此启动"
         }
     }
@@ -281,12 +302,9 @@ internal object CarPlusReceiver {
             send(Message.obtain(null, CarPlusReceiverService.RECONNECT_IF_PAIRED))
 
     private fun startRemote(refresh: Boolean) {
-        val last = bindingContext?.let(DisplayPrefs::lastSession)?.takeIf { it.carFromCar }
-        val canvas = requestedCanvas ?: bindingContext?.let(DisplayPrefs::carPlusStreamSize)
-            ?: last?.let { CarPlusVideo.displaySize(it.carWidth, it.carHeight) }
         send(Message.obtain(null, CarPlusReceiverService.START, bindingGeneration, if (refresh) 1 else 0).apply {
             replyTo = replies
-            data = canvasBundle(canvas)
+            data = canvasBundle(requestedCanvas)
         })
     }
 
@@ -316,6 +334,8 @@ internal object CarPlusReceiver {
     }
 
     private fun unbind() {
+        pendingStop = false
+        isSourceConnected = false
         val app = bindingContext
         bindingContext = null
         receiver = null

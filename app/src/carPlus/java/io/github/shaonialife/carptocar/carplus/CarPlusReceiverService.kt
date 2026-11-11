@@ -34,19 +34,22 @@ internal class CarPlusReceiverService : Service() {
                         // The client has unbound.
                     }
                 }
-                CarPlusSdk.report = { status, log ->
+                fun report(status: String?, log: String?) {
                     try {
                         replies.send(Message.obtain(null, STATUS, generation, 0).apply {
                             data = Bundle().apply {
                                 putString(STATUS_TEXT, status)
                                 putString(LOG_TEXT, log)
+                                putBoolean(SOURCE_CONNECTED, CarPlusSdk.isConnected)
                             }
                         })
                     } catch (_: RemoteException) {
                         // The service is bound to the sender. onDestroy stops the SDK when it goes away.
                     }
                 }
+                CarPlusSdk.report = ::report
                 CarPlusSdk.start(applicationContext, refresh = message.arg2 == 1, canvas = canvas ?: CarPlusVideo.defaultSize)
+                report(null, null)
             }
             VIDEO_CANVAS -> CarPlusVideoTap.requestedCanvas = canvasFrom(message)
             SURFACE -> {
@@ -73,7 +76,12 @@ internal class CarPlusReceiverService : Service() {
             }
             STOP -> {
                 CarPlusVideoTap.setTarget(null)
-                CarPlusSdk.stop()
+                CarPlusSdk.stop(stopNative = message.arg1 == 1)
+                try {
+                    message.replyTo?.send(Message.obtain(null, STOPPED, message.arg2, 0))
+                } catch (_: RemoteException) {
+                    // The sender has already stopped.
+                }
             }
             AUDIO_TARGET -> CarPlusAudioTap.setTarget(message.replyTo)
             RECONNECT_IF_PAIRED -> CarPlusSdk.reconnectIfPaired(restartCurrent = true)
@@ -112,11 +120,13 @@ internal class CarPlusReceiverService : Service() {
         const val VIDEO_CANVAS = 9
         const val VIDEO_SOURCE = 10
         const val RECONNECT_IF_PAIRED = 11
+        const val STOPPED = 12
         const val VIDEO_WIDTH = "videoWidth"
         const val VIDEO_HEIGHT = "videoHeight"
         const val VIDEO_PIPE = "videoPipe"
         const val SURFACE_VALUE = "surface"
         const val STATUS_TEXT = "status"
         const val LOG_TEXT = "log"
+        const val SOURCE_CONNECTED = "sourceConnected"
     }
 }

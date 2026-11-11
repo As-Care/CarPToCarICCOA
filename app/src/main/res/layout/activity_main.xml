@@ -71,12 +71,12 @@
                     android:layout_height="wrap_content"
                     android:layout_marginStart="8dp"
                     android:minHeight="48dp"
-                    android:background="@drawable/bg_cta_fill"
+                    android:background="@drawable/bg_btn_tonal"
                     android:gravity="center"
                     android:paddingHorizontal="14dp"
                     android:text="@string/open_system_car_plus"
                     android:textAllCaps="false"
-                    android:textColor="@color/m3_on_primary"
+                    android:textColor="@color/m3_on_sec_container"
                     android:textSize="13sp"
                     android:textStyle="bold"
                     android:visibility="gone" />
@@ -320,34 +320,50 @@
                 <LinearLayout
                     android:layout_width="match_parent"
                     android:layout_height="wrap_content"
-                    android:gravity="center_vertical"
-                    android:orientation="horizontal"
+                    android:orientation="vertical"
                     android:paddingTop="14dp"
-                    android:paddingBottom="10dp">
+                    android:paddingBottom="12dp">
 
                     <TextView
-                        android:layout_width="0dp"
+                        android:layout_width="wrap_content"
                         android:layout_height="wrap_content"
-                        android:layout_weight="1"
                         android:letterSpacing="0.06"
                         android:text="连接准备"
                         android:textColor="#8FA09F"
                         android:textSize="12.5sp"
                         android:textStyle="bold" />
 
-                    <TextView
-                        android:id="@+id/readyCount"
-                        android:layout_width="wrap_content"
+                    <LinearLayout
+                        android:layout_width="match_parent"
                         android:layout_height="wrap_content"
-                        android:background="@drawable/bg_count"
-                        android:paddingStart="9dp"
-                        android:paddingTop="2dp"
-                        android:paddingEnd="9dp"
-                        android:paddingBottom="2dp"
-                        android:text="0/2"
-                        android:textColor="#6FC4CF"
-                        android:textSize="11sp"
-                        android:textStyle="bold" />
+                        android:layout_marginTop="8dp"
+                        android:orientation="horizontal">
+
+                        <TextView
+                            android:id="@+id/readyBluetooth"
+                            android:layout_width="0dp"
+                            android:layout_height="match_parent"
+                            android:layout_marginEnd="8dp"
+                            android:layout_weight="1"
+                            android:background="@drawable/bg_count"
+                            android:gravity="center"
+                            android:paddingHorizontal="8dp"
+                            android:paddingVertical="4dp"
+                            android:textColor="@color/m3_on_var"
+                            android:textSize="12sp" />
+
+                        <TextView
+                            android:id="@+id/readyWifi"
+                            android:layout_width="0dp"
+                            android:layout_height="match_parent"
+                            android:layout_weight="1"
+                            android:background="@drawable/bg_count"
+                            android:gravity="center"
+                            android:paddingHorizontal="8dp"
+                            android:paddingVertical="4dp"
+                            android:textColor="@color/m3_on_var"
+                            android:textSize="12sp" />
+                    </LinearLayout>
                 </LinearLayout>
 
                 <View
@@ -355,6 +371,60 @@
                     android:layout_height="1dp"
                     android:layout_marginStart="54dp"
                     android:background="#5A394444" />
+
+                <LinearLayout
+                    android:id="@+id/keepAliveCheck"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginVertical="8dp"
+                    android:background="@drawable/bg_btn_tonal"
+                    android:clickable="true"
+                    android:focusable="true"
+                    android:gravity="center_vertical"
+                    android:minHeight="60dp"
+                    android:orientation="horizontal"
+                    android:paddingHorizontal="14dp"
+                    android:paddingVertical="8dp">
+
+                    <ImageView
+                        android:layout_width="22dp"
+                        android:layout_height="22dp"
+                        android:importantForAccessibility="no"
+                        android:src="@drawable/ic_info_circle"
+                        android:tint="@color/m3_primary" />
+
+                    <LinearLayout
+                        android:layout_width="0dp"
+                        android:layout_height="wrap_content"
+                        android:layout_marginStart="12dp"
+                        android:layout_weight="1"
+                        android:orientation="vertical">
+
+                        <TextView
+                            android:layout_width="match_parent"
+                            android:layout_height="wrap_content"
+                            android:text="保活配置检查"
+                            android:textColor="@color/m3_on_sec_container"
+                            android:textSize="14sp"
+                            android:textStyle="bold" />
+
+                        <TextView
+                            android:id="@+id/keepAliveStatus"
+                            android:layout_width="match_parent"
+                            android:layout_height="wrap_content"
+                            android:layout_marginTop="2dp"
+                            android:textColor="@color/m3_on_var"
+                            android:textSize="12sp" />
+                    </LinearLayout>
+
+                    <ImageView
+                        android:layout_width="18dp"
+                        android:layout_height="18dp"
+                        android:layout_marginStart="8dp"
+                        android:importantForAccessibility="no"
+                        android:rotation="-90"
+                        android:src="@drawable/ic_chev_down" />
+                </LinearLayout>
 
                 <!-- 启动后自动连接（默认开启）：打开 App 即发起连接，无需手动点按钮 -->
                 <LinearLayout
@@ -576,14 +646,15 @@
                                 android:layout_width="wrap_content"
                                 android:layout_height="wrap_content"
                                 android:layout_marginStart="10dp"
-                                android:background="@drawable/bg_tbtn"
+                                android:background="@drawable/bg_btn_compact"
                                 android:gravity="center"
+                                android:minHeight="36dp"
                                 android:paddingStart="10dp"
                                 android:paddingTop="4dp"
                                 android:paddingEnd="10dp"
                                 android:paddingBottom="4dp"
                                 android:text="选择设备"
-                                android:textColor="@color/m3_primary"
+                                android:textColor="@color/m3_on_sec_container"
                                 android:textSize="12sp"
                                 android:textStyle="bold" />
                         </LinearLayout>
@@ -619,180 +690,7 @@
                     android:layout_marginStart="54dp"
                     android:background="#5A394444" />
 
-                <!-- 车机只认苹果设备时的兼容探针（默认关）：额外注册两条 CarPlay 占位
-                     SDP 记录，并让 iAP2 监听常开（App 一启动就发布服务）。
-                     不动已跑通的车型——奥迪 MIB3 这类固件根本不看 EIR/SDP 里的 Apple UUID -->
-                <LinearLayout
-                    android:layout_width="match_parent"
-                    android:layout_height="wrap_content"
-                    android:gravity="center_vertical"
-                    android:minHeight="56dp"
-                    android:orientation="horizontal"
-                    android:paddingTop="4dp"
-                    android:paddingBottom="4dp">
-
-                    <LinearLayout
-                        android:layout_width="0dp"
-                        android:layout_height="wrap_content"
-                        android:layout_marginStart="54dp"
-                        android:layout_weight="1"
-                        android:orientation="vertical">
-
-                        <TextView
-                            android:layout_width="wrap_content"
-                            android:layout_height="wrap_content"
-                            android:text="兼容「只认苹果设备」的车机"
-                            android:textColor="@color/m3_on_surface"
-                            android:textSize="13.5sp" />
-
-                        <TextView
-                            android:id="@+id/btCompatNote"
-                            android:layout_width="match_parent"
-                            android:layout_height="wrap_content"
-                            android:layout_marginTop="2dp"
-                            android:text="默认关闭。开启后多声明两条 CarPlay 服务，并让蓝牙监听常开（界面显示「不支持 Apple CarPlay」的车机可试）"
-                            android:textColor="@color/m3_on_var"
-                            android:textSize="11.5sp" />
-                    </LinearLayout>
-
-                    <androidx.appcompat.widget.SwitchCompat
-                        xmlns:app="http://schemas.android.com/apk/res-auto"
-                        android:id="@+id/switchBtCompat"
-                        android:layout_width="wrap_content"
-                        android:layout_height="wrap_content"
-                        android:layout_marginStart="8dp"
-                        android:thumb="@drawable/sw_thumb"
-                        app:track="@drawable/sw_track" />
-                </LinearLayout>
-
-                <!-- 本机蓝牙地址：接收端（WinPlay 等）按它做设备过滤，厂商脱敏时必须手填 -->
-                <LinearLayout
-                    android:layout_width="match_parent"
-                    android:layout_height="wrap_content"
-                    android:gravity="center_vertical"
-                    android:minHeight="60dp"
-                    android:orientation="horizontal"
-                    android:paddingTop="6dp"
-                    android:paddingBottom="6dp">
-
-                    <FrameLayout
-                        android:layout_width="38dp"
-                        android:layout_height="38dp"
-                        android:background="@drawable/bg_icon_tile">
-
-                        <ImageView
-                            android:layout_width="20dp"
-                            android:layout_height="20dp"
-                            android:layout_gravity="center"
-                            android:contentDescription="本机蓝牙地址"
-                            android:src="@drawable/ic_bluetooth" />
-                    </FrameLayout>
-
-                    <LinearLayout
-                        android:layout_width="0dp"
-                        android:layout_height="wrap_content"
-                        android:layout_marginStart="14dp"
-                        android:layout_weight="1"
-                        android:orientation="vertical">
-
-                        <LinearLayout
-                            android:layout_width="match_parent"
-                            android:layout_height="wrap_content"
-                            android:gravity="center_vertical"
-                            android:orientation="horizontal">
-
-                            <LinearLayout
-                                android:layout_width="0dp"
-                                android:layout_height="wrap_content"
-                                android:layout_weight="1"
-                                android:orientation="vertical">
-
-                                <TextView
-                                    android:layout_width="wrap_content"
-                                    android:layout_height="wrap_content"
-                                    android:text="本机蓝牙地址"
-                                    android:textColor="@color/m3_on_surface"
-                                    android:textSize="14.5sp"
-                                    android:textStyle="bold" />
-
-                                <TextView
-                                    android:layout_width="wrap_content"
-                                    android:layout_height="wrap_content"
-                                    android:layout_marginTop="3dp"
-                                    android:text="ColorOS 系统在设置—关于本机—状态信息里面查找"
-                                    android:textColor="@color/m3_on_var"
-                                    android:textSize="11.5sp" />
-                            </LinearLayout>
-
-                            <androidx.appcompat.widget.AppCompatButton
-                                android:id="@+id/btnViewMac"
-                                android:layout_width="wrap_content"
-                                android:layout_height="36dp"
-                                android:layout_marginStart="8dp"
-                                android:minWidth="60dp"
-                                android:minHeight="36dp"
-                                android:paddingHorizontal="14dp"
-                                android:background="@drawable/bg_action_btn"
-                                android:text="查看"
-                                android:textColor="@color/m3_primary"
-                                android:textSize="12.5sp"
-                                android:textStyle="bold" />
-                        </LinearLayout>
-
-                        <LinearLayout
-                            android:layout_width="match_parent"
-                            android:layout_height="wrap_content"
-                            android:layout_marginTop="8dp"
-                            android:gravity="center_vertical"
-                            android:orientation="horizontal">
-
-                            <EditText
-                                android:id="@+id/macInput"
-                                android:layout_width="0dp"
-                                android:layout_height="48dp"
-                                android:layout_weight="1"
-                                android:background="@drawable/bg_ssid_sel"
-                                android:hint="AA:BB:CC:DD:EE:FF"
-                                android:importantForAutofill="no"
-                                android:inputType="text"
-                                android:maxLines="1"
-                                android:paddingHorizontal="10dp"
-                                android:textColor="#C4D2D1"
-                                android:textColorHint="@color/m3_outline"
-                                android:textSize="13.5sp"
-                                android:textStyle="bold" />
-
-                            <androidx.appcompat.widget.AppCompatButton
-                                android:id="@+id/btnSaveMac"
-                                android:layout_width="wrap_content"
-                                android:layout_height="38dp"
-                                android:layout_marginStart="8dp"
-                                android:minWidth="60dp"
-                                android:minHeight="38dp"
-                                android:paddingHorizontal="14dp"
-                                android:background="@drawable/bg_action_btn"
-                                android:text="保存"
-                                android:textColor="@color/m3_primary"
-                                android:textSize="12.5sp"
-                                android:textStyle="bold" />
-                        </LinearLayout>
-
-                        <TextView
-                            android:id="@+id/tvMacHint"
-                            android:layout_width="match_parent"
-                            android:layout_height="wrap_content"
-                            android:layout_marginTop="4dp"
-                            android:textColor="@color/m3_error"
-                            android:textSize="11.5sp"
-                            android:visibility="gone" />
-                    </LinearLayout>
-                </LinearLayout>
-
-                <View
-                    android:layout_width="match_parent"
-                    android:layout_height="1dp"
-                    android:layout_marginStart="54dp"
-                    android:background="#5A394444" />
+                <!-- 车机热点 -->
                 <LinearLayout
                     android:layout_width="match_parent"
                     android:layout_height="wrap_content"
@@ -836,7 +734,7 @@
                             android:layout_height="wrap_content"
                             android:layout_marginTop="2dp"
                             android:background="@drawable/bg_ssid_sel"
-                            android:hint="接收端热点 SSID（0x5703 下发）"
+                            android:hint="等待车机提供热点名称"
                             android:importantForAutofill="no"
                             android:inputType="text"
                             android:paddingStart="10dp"
@@ -847,30 +745,268 @@
                             android:textColorHint="#5A6B7A"
                             android:textSize="13.5sp"
                             android:textStyle="bold" />
+
+                        <TextView
+                            android:id="@+id/carWifiStatus"
+                            android:layout_width="match_parent"
+                            android:layout_height="wrap_content"
+                            android:layout_marginTop="4dp"
+                            android:textColor="@color/m3_on_var"
+                            android:textSize="11.5sp" />
                     </LinearLayout>
 
                     <TextView
                         android:id="@+id/btnWifi"
                         android:layout_width="wrap_content"
+                        android:layout_marginStart="8dp"
                         android:layout_height="wrap_content"
-                        android:background="@drawable/bg_tbtn"
+                        android:background="@drawable/bg_btn_compact"
                         android:gravity="center"
+                        android:minHeight="36dp"
                         android:paddingStart="12dp"
-                        android:paddingTop="9dp"
+                        android:paddingTop="4dp"
                         android:paddingEnd="12dp"
-                        android:paddingBottom="9dp"
+                        android:paddingBottom="4dp"
                         android:text="去连接"
-                        android:textColor="@color/m3_primary"
+                        android:textColor="@color/m3_on_sec_container"
                         android:textSize="13sp"
                         android:textStyle="bold" />
                 </LinearLayout>
+
+                <View
+                    android:layout_width="match_parent"
+                    android:layout_height="1dp"
+                    android:layout_marginStart="54dp"
+                    android:background="#5A394444" />
+
+                <!-- 高级与兼容设置（折叠面板：收纳低频/一次性设置项） -->
+                <LinearLayout
+                    android:id="@+id/advancedConnHeader"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:background="@drawable/bg_tbtn"
+                    android:clickable="true"
+                    android:focusable="true"
+                    android:gravity="center_vertical"
+                    android:minHeight="54dp"
+                    android:orientation="horizontal"
+                    android:paddingStart="2dp"
+                    android:paddingTop="8dp"
+                    android:paddingEnd="2dp"
+                    android:paddingBottom="8dp">
+
+                    <FrameLayout
+                        android:layout_width="38dp"
+                        android:layout_height="38dp"
+                        android:background="@drawable/bg_icon_tile">
+
+                        <ImageView
+                            android:layout_width="20dp"
+                            android:layout_height="20dp"
+                            android:layout_gravity="center"
+                            android:contentDescription="高级与兼容设置"
+                            android:src="@drawable/ic_refresh" />
+                    </FrameLayout>
+
+                    <LinearLayout
+                        android:layout_width="0dp"
+                        android:layout_height="wrap_content"
+                        android:layout_marginStart="14dp"
+                        android:layout_weight="1"
+                        android:orientation="vertical">
+
+                        <TextView
+                            android:layout_width="wrap_content"
+                            android:layout_height="wrap_content"
+                            android:text="高级与兼容设置"
+                            android:textColor="@color/m3_on_surface"
+                            android:textSize="14sp"
+                            android:textStyle="bold" />
+
+                        <TextView
+                            android:id="@+id/advancedConnSubline"
+                            android:layout_width="wrap_content"
+                            android:layout_height="wrap_content"
+                            android:layout_marginTop="2dp"
+                            android:text="本机 MAC · 苹果协议兼容"
+                            android:textColor="@color/m3_on_var"
+                            android:textSize="11.5sp" />
+                    </LinearLayout>
+
+                    <ImageView
+                        android:id="@+id/advancedConnChevron"
+                        android:layout_width="22dp"
+                        android:layout_height="22dp"
+                        android:contentDescription="展开"
+                        android:src="@drawable/ic_chev_down" />
+                </LinearLayout>
+
+                <LinearLayout
+                    android:id="@+id/advancedConnBody"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:orientation="vertical"
+                    android:paddingTop="4dp"
+                    android:paddingBottom="10dp"
+                    android:visibility="gone">
+
+                    <!-- 车机只认苹果设备时的兼容探针（默认关）：额外注册两条 CarPlay 占位
+                         SDP 记录，并让 iAP2 监听常开（App 一启动就发布服务）。
+                         不动已跑通的车型——奥迪 MIB3 这类固件根本不看 EIR/SDP 里的 Apple UUID -->
+                    <LinearLayout
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:gravity="center_vertical"
+                        android:minHeight="56dp"
+                        android:orientation="horizontal"
+                        android:paddingTop="4dp"
+                        android:paddingBottom="4dp">
+
+                        <LinearLayout
+                            android:layout_width="0dp"
+                            android:layout_height="wrap_content"
+                            android:layout_weight="1"
+                            android:orientation="vertical">
+
+                            <TextView
+                                android:layout_width="wrap_content"
+                                android:layout_height="wrap_content"
+                                android:text="车机兼容模式"
+                                android:textColor="@color/m3_on_surface"
+                                android:textSize="13.5sp" />
+
+                            <TextView
+                                android:id="@+id/btCompatNote"
+                                android:layout_width="match_parent"
+                                android:layout_height="wrap_content"
+                                android:layout_marginTop="2dp"
+                                android:text="车机提示「不支持 Apple CarPlay」时可尝试开启。"
+                                android:textColor="@color/m3_on_var"
+                                android:textSize="11.5sp" />
+                        </LinearLayout>
+
+                        <androidx.appcompat.widget.SwitchCompat
+                            xmlns:app="http://schemas.android.com/apk/res-auto"
+                            android:id="@+id/switchBtCompat"
+                            android:layout_width="wrap_content"
+                            android:layout_height="wrap_content"
+                            android:layout_marginStart="8dp"
+                            android:thumb="@drawable/sw_thumb"
+                            app:track="@drawable/sw_track" />
+                    </LinearLayout>
+
+                    <View
+                        android:layout_width="match_parent"
+                        android:layout_height="1dp"
+                        android:layout_marginTop="8dp"
+                        android:layout_marginBottom="8dp"
+                        android:background="#5A394444" />
+
+                    <!-- 本机蓝牙地址：接收端（WinPlay 等）按它做设备过滤，厂商脱敏时必须手填 -->
+                    <LinearLayout
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:orientation="vertical"
+                        android:paddingTop="4dp"
+                        android:paddingBottom="4dp">
+
+                        <LinearLayout
+                            android:layout_width="match_parent"
+                            android:layout_height="wrap_content"
+                            android:gravity="center_vertical"
+                            android:orientation="horizontal">
+
+                            <LinearLayout
+                                android:layout_width="0dp"
+                                android:layout_height="wrap_content"
+                                android:layout_weight="1"
+                                android:orientation="vertical">
+
+                                <TextView
+                                    android:layout_width="wrap_content"
+                                    android:layout_height="wrap_content"
+                                    android:text="本机蓝牙地址"
+                                    android:textColor="@color/m3_on_surface"
+                                    android:textSize="14sp"
+                                    android:textStyle="bold" />
+
+                                <TextView
+                                    android:layout_width="wrap_content"
+                                    android:layout_height="wrap_content"
+                                    android:layout_marginTop="3dp"
+                                    android:text="ColorOS 系统在设置—关于本机—状态信息里面查找"
+                                    android:textColor="@color/m3_on_var"
+                                    android:textSize="11.5sp" />
+                            </LinearLayout>
+
+                            <androidx.appcompat.widget.AppCompatButton
+                                android:id="@+id/btnViewMac"
+                                android:layout_width="wrap_content"
+                                android:layout_height="wrap_content"
+                                android:layout_marginStart="8dp"
+                                android:minWidth="60dp"
+                                android:minHeight="48dp"
+                                android:paddingHorizontal="14dp"
+                                android:background="@drawable/bg_btn_tonal"
+                                android:text="查看"
+                                android:textColor="@color/m3_on_sec_container"
+                                android:textSize="12.5sp"
+                                android:textStyle="bold" />
+                        </LinearLayout>
+
+                        <LinearLayout
+                            android:layout_width="match_parent"
+                            android:layout_height="wrap_content"
+                            android:layout_marginTop="8dp"
+                            android:gravity="center_vertical"
+                            android:orientation="horizontal">
+
+                            <EditText
+                                android:id="@+id/macInput"
+                                android:layout_width="0dp"
+                                android:layout_height="48dp"
+                                android:layout_weight="1"
+                                android:background="@drawable/bg_ssid_sel"
+                                android:hint="AA:BB:CC:DD:EE:FF"
+                                android:importantForAutofill="no"
+                                android:inputType="text"
+                                android:maxLines="1"
+                                android:paddingHorizontal="10dp"
+                                android:textColor="#C4D2D1"
+                                android:textColorHint="@color/m3_outline"
+                                android:textSize="13.5sp"
+                                android:textStyle="bold" />
+
+                            <androidx.appcompat.widget.AppCompatButton
+                                android:id="@+id/btnSaveMac"
+                                android:layout_width="wrap_content"
+                                android:layout_height="wrap_content"
+                                android:layout_marginStart="8dp"
+                                android:minWidth="60dp"
+                                android:minHeight="48dp"
+                                android:paddingHorizontal="14dp"
+                                android:background="@drawable/bg_btn_tonal"
+                                android:text="保存"
+                                android:textColor="@color/m3_on_sec_container"
+                                android:textSize="12.5sp"
+                                android:textStyle="bold" />
+                        </LinearLayout>
+
+                        <TextView
+                            android:id="@+id/tvMacHint"
+                            android:layout_width="match_parent"
+                            android:layout_height="wrap_content"
+                            android:layout_marginTop="4dp"
+                            android:textColor="@color/m3_error"
+                            android:textSize="11.5sp"
+                            android:visibility="gone" />
+                    </LinearLayout>
+                </LinearLayout>
             </LinearLayout>
 
-            <!-- 显示设置（原「显示」面板内容迁移至此，2026-10-24）：
-                 本地 CarLife 劫持开关 + 流分辨率缩放 + 触摸注入节流
-                 （目标帧率设置已移除：固定 60fps，见 DisplayPrefs.FPS） -->
+            <!-- ==================== 互联服务 ==================== -->
             <LinearLayout
-                android:id="@+id/displayCard"
+                android:id="@+id/servicesCard"
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
                 android:layout_marginTop="12dp"
@@ -896,8 +1032,8 @@
                             android:layout_width="20dp"
                             android:layout_height="20dp"
                             android:layout_gravity="center"
-                            android:contentDescription="显示"
-                            android:src="@drawable/ic_menu_display" />
+                            android:contentDescription="互联服务"
+                            android:src="@drawable/ic_car" />
                     </FrameLayout>
 
                     <LinearLayout
@@ -910,7 +1046,7 @@
                         <TextView
                             android:layout_width="wrap_content"
                             android:layout_height="wrap_content"
-                            android:text="显示"
+                            android:text="互联服务"
                             android:textColor="@color/m3_on_surface"
                             android:textSize="14.5sp"
                             android:textStyle="bold" />
@@ -919,7 +1055,7 @@
                             android:layout_width="wrap_content"
                             android:layout_height="wrap_content"
                             android:layout_marginTop="2dp"
-                            android:text="@string/display_card_subtitle"
+                            android:text="投屏来源"
                             android:textColor="@color/m3_on_var"
                             android:textSize="12sp" />
                     </LinearLayout>
@@ -974,53 +1110,63 @@
                         app:track="@drawable/sw_track" />
                 </LinearLayout>
 
-                <View
-                    android:layout_width="match_parent"
-                    android:layout_height="1dp"
-                    android:layout_marginTop="12dp"
-                    android:layout_marginStart="52dp"
-                    android:background="#5A394444" />
+            </LinearLayout>
 
-                <!-- 使用车机 GPS（0x18010 车机 → CarLife） -->
+            <!-- ==================== 投屏显示 ==================== -->
+            <LinearLayout
+                android:id="@+id/displayCard"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="12dp"
+                android:background="@drawable/bg_card"
+                android:orientation="vertical"
+                android:paddingStart="16dp"
+                android:paddingTop="14dp"
+                android:paddingEnd="16dp"
+                android:paddingBottom="16dp">
+
                 <LinearLayout
                     android:layout_width="match_parent"
                     android:layout_height="wrap_content"
-                    android:layout_marginTop="12dp"
-                    android:gravity="center_vertical"
-                    android:orientation="horizontal">
+                    android:orientation="horizontal"
+                    android:gravity="center_vertical">
+
+                    <FrameLayout
+                        android:layout_width="38dp"
+                        android:layout_height="38dp"
+                        android:background="@drawable/bg_icon_tile">
+
+                        <ImageView
+                            android:layout_width="20dp"
+                            android:layout_height="20dp"
+                            android:layout_gravity="center"
+                            android:contentDescription="显示"
+                            android:src="@drawable/ic_menu_display" />
+                    </FrameLayout>
 
                     <LinearLayout
                         android:layout_width="0dp"
                         android:layout_height="wrap_content"
+                        android:layout_marginStart="14dp"
                         android:layout_weight="1"
                         android:orientation="vertical">
 
                         <TextView
                             android:layout_width="wrap_content"
                             android:layout_height="wrap_content"
-                            android:text="使用车机 GPS"
+                            android:text="投屏显示"
                             android:textColor="@color/m3_on_surface"
-                            android:textSize="14sp"
+                            android:textSize="14.5sp"
                             android:textStyle="bold" />
 
                         <TextView
-                            android:id="@+id/carGpsNote"
-                            android:layout_width="match_parent"
+                            android:layout_width="wrap_content"
                             android:layout_height="wrap_content"
                             android:layout_marginTop="2dp"
-                            android:text="@string/car_gps_note"
+                            android:text="@string/display_card_subtitle"
                             android:textColor="@color/m3_on_var"
                             android:textSize="12sp" />
                     </LinearLayout>
-
-                    <androidx.appcompat.widget.SwitchCompat
-                        xmlns:app="http://schemas.android.com/apk/res-auto"
-                        android:id="@+id/switchCarGps"
-                        android:layout_width="wrap_content"
-                        android:layout_height="wrap_content"
-                        android:layout_marginStart="8dp"
-                        android:thumb="@drawable/sw_thumb"
-                        app:track="@drawable/sw_track" />
                 </LinearLayout>
 
                 <View
@@ -1065,6 +1211,15 @@
                         android:textColor="@color/m3_on_var"
                         android:textSize="12sp" />
                 </LinearLayout>
+
+                <TextView
+                    android:id="@+id/displaySizeTarget"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="6dp"
+                    android:textColor="@color/m3_on_var"
+                    android:textSize="12sp"
+                    android:visibility="gone" />
 
                 <LinearLayout
                     android:id="@+id/displaySizeControls"
@@ -1117,14 +1272,15 @@
                     <androidx.appcompat.widget.AppCompatButton
                         android:id="@+id/btnSaveDisplaySize"
                         android:layout_width="wrap_content"
-                        android:layout_height="38dp"
+                        android:layout_height="wrap_content"
                         android:layout_marginStart="8dp"
                         android:minWidth="60dp"
-                        android:minHeight="38dp"
+                        android:minHeight="36dp"
+                        android:paddingVertical="4dp"
                         android:paddingHorizontal="14dp"
-                        android:background="@drawable/bg_action_btn"
+                        android:background="@drawable/bg_btn_compact"
                         android:text="保存"
-                        android:textColor="@color/m3_primary"
+                        android:textColor="@color/m3_on_sec_container"
                         android:textSize="12.5sp"
                         android:textStyle="bold" />
                 </LinearLayout>
@@ -1190,7 +1346,7 @@
                     android:layout_width="wrap_content"
                     android:layout_height="wrap_content"
                     android:layout_marginTop="14dp"
-                    android:text="触摸注入节流"
+                    android:text="滑动上报间隔"
                     android:textColor="@color/m3_on_surface"
                     android:textSize="14sp"
                     android:textStyle="bold" />
@@ -1224,7 +1380,7 @@
                     android:layout_width="match_parent"
                     android:layout_height="wrap_content"
                     android:layout_marginTop="2dp"
-                    android:text="交互滞后但帧率正常（事件派发堆积）时调高试验；拖动即时生效"
+                    android:text="车机滑动有拖延时可小幅调高。拖动后立即生效。"
                     android:textColor="@color/m3_on_var"
                     android:textSize="12sp" />
             </LinearLayout>
@@ -1288,7 +1444,7 @@
                             android:layout_width="wrap_content"
                             android:layout_height="wrap_content"
                             android:layout_marginTop="2dp"
-                            android:text="最近日志 · 可复制反馈问题"
+                            android:text="查看、复制或导出连接记录"
                             android:textColor="@color/m3_on_var"
                             android:textSize="12sp" />
                     </LinearLayout>
@@ -1368,16 +1524,46 @@
                             android:src="@drawable/ic_export" />
                     </LinearLayout>
 
+                    <LinearLayout
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:layout_marginTop="6dp"
+                        android:orientation="horizontal">
+
+                        <androidx.appcompat.widget.AppCompatButton
+                            android:id="@+id/logFilterAll"
+                            android:layout_width="0dp"
+                            android:layout_height="wrap_content"
+                            android:layout_marginEnd="4dp"
+                            android:layout_weight="1"
+                            android:minHeight="36dp"
+                            android:paddingVertical="4dp"
+                            android:text="全部日志"
+                            android:textAllCaps="false"
+                            android:textSize="12sp" />
+
+                        <androidx.appcompat.widget.AppCompatButton
+                            android:id="@+id/logFilterIssues"
+                            android:layout_width="0dp"
+                            android:layout_height="wrap_content"
+                            android:layout_marginStart="4dp"
+                            android:layout_weight="1"
+                            android:minHeight="36dp"
+                            android:paddingVertical="4dp"
+                            android:text="只看异常"
+                            android:textAllCaps="false"
+                            android:textSize="12sp" />
+                    </LinearLayout>
+
                     <FrameLayout
                         android:layout_width="match_parent"
                         android:layout_height="wrap_content"
-                        android:layout_marginTop="10dp">
+                        android:layout_marginTop="8dp">
 
                     <TextView
                         android:id="@+id/logText"
                         android:layout_width="match_parent"
                         android:layout_height="172dp"
-                        android:layout_marginTop="10dp"
                         android:background="@drawable/bg_console"
                         android:fadeScrollbars="true"
                         android:fontFamily="monospace"
@@ -1385,7 +1571,8 @@
                         android:lineSpacingExtra="3dp"
                         android:padding="11dp"
                         android:scrollbars="vertical"
-                        android:textColor="@color/m3_console_text"
+                        android:textColor="@color/m3_on_surface"
+                        android:textColorHint="@color/m3_on_var"
                         android:textSize="10.5sp" />
 
                         <ImageView
@@ -1401,6 +1588,19 @@
                             android:src="@drawable/ic_chev_down"
                             android:visibility="gone" />
                     </FrameLayout>
+
+                    <androidx.appcompat.widget.AppCompatButton
+                        android:id="@+id/btnCopyIssueSummary"
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:layout_marginTop="8dp"
+                        android:background="@drawable/bg_btn_compact"
+                        android:minHeight="36dp"
+                        android:paddingVertical="4dp"
+                        android:text="复制故障摘要"
+                        android:textAllCaps="false"
+                        android:textColor="@color/m3_on_sec_container"
+                        android:textSize="12sp" />
                 </LinearLayout>
             </LinearLayout>
 

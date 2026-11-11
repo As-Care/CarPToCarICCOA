@@ -4,6 +4,7 @@ import android.Manifest
 import android.animation.ObjectAnimator
 import android.app.NotificationManager
 import android.bluetooth.BluetoothDevice
+import android.bluetooth.BluetoothManager
 import android.content.BroadcastReceiver
 import android.content.ClipData
 import android.content.ClipboardManager
@@ -20,7 +21,10 @@ import android.os.Looper
 import android.os.PowerManager
 import android.os.SystemClock
 import android.provider.Settings
+import android.text.SpannableStringBuilder
+import android.text.Spanned
 import android.text.method.ScrollingMovementMethod
+import android.text.style.ForegroundColorSpan
 import android.view.View
 import android.widget.EditText
 import android.widget.FrameLayout
@@ -40,7 +44,6 @@ import io.github.shaonialife.carptocar.bt.BtProfiles
 import io.github.shaonialife.carptocar.bt.CarApproachPrefs
 import io.github.shaonialife.carptocar.bt.CarApproachReceiver
 import io.github.shaonialife.carptocar.bt.TargetDevicePrefs
-import io.github.shaonialife.carptocar.carlife.CarGpsOption
 import io.github.shaonialife.carptocar.carlife.CarLifeHijack
 import io.github.shaonialife.carptocar.carplus.CarPlusReceiver
 import io.github.shaonialife.carptocar.carplus.CarPlusVideo
@@ -60,10 +63,13 @@ import io.github.shaonialife.carptocar.ui.ScreenDimmer
 import io.github.shaonialife.carptocar.ui.SignalWavesView
 import io.github.shaonialife.carptocar.util.AppVersion
 import io.github.shaonialife.carptocar.util.Bg
+import io.github.shaonialife.carptocar.util.ConnectionIssueSummary
 import io.github.shaonialife.carptocar.util.DeviceIdentity
+import io.github.shaonialife.carptocar.util.LogDisplayLevel
 import io.github.shaonialife.carptocar.util.LogExporter
 import io.github.shaonialife.carptocar.util.SysShell
 import io.github.shaonialife.carptocar.video.StreamFps
+import io.github.shaonialife.carptocar.video.VideoSender
 import java.util.Locale
 
 /**
@@ -84,8 +90,12 @@ class MainActivity : AppCompatActivity() {
 
     /** 连接中的默认副标题（无阶段提示时）。 */
     private companion object {
-        const val DEFAULT_CONNECTING_HINT = "蓝牙 iAP2 握手 → 加入车机热点 → 建立 CarPlay 会话"
+        const val DEFAULT_CONNECTING_HINT = "正在连接蓝牙和车机热点，准备投屏"
         const val KEY_DISCLAIMER_DEADLINE = "disclaimer_deadline"
+        const val KEY_LOG_ISSUES_ONLY = "log_issues_only"
+        const val KEY_RESOLUTION_PEER_ADDRESS = "resolution_peer_address"
+        const val KEY_RESOLUTION_PEER_NAME = "resolution_peer_name"
+        const val CAR_PLUS_PICTURE_WAIT_MS = 10_000L
 
         /** 本机蓝牙地址未填写：英雄卡副标题与输入框下方提示共用同一句。 */
         const val HINT_MAC_MISSING = "本机蓝牙地址未填写 —— 请先在下方填写并保存"
@@ -111,6 +121,8 @@ class MainActivity : AppCompatActivity() {
     private lateinit var heroStats: TextView
     /** 「显示」卡片里的分辨率行（车机通告值 + 本次码流尺寸）。 */
     private lateinit var displayResolutionNote: TextView
+    private var resolutionHistoryPeer: TargetDevicePrefs.Target? = null
+    private var resolutionInputPeer: TargetDevicePrefs.Target? = null
     private val displayHistoryListener = SharedPreferences.OnSharedPreferenceChangeListener { _, _ ->
         renderDisplayHistory()
     }
@@ -120,7 +132,8 @@ class MainActivity : AppCompatActivity() {
     private lateinit var ctaIcon: ImageView
     private lateinit var ctaLabel: TextView
     private lateinit var audioTag: TextView
-    private lateinit var readyCount: TextView
+    private lateinit var readyBluetooth: TextView
+    private lateinit var readyWifi: TextView
     private lateinit var ssidInput: EditText
     private lateinit var macInput: EditText
     private lateinit var tvMacHint: TextView
@@ -129,14 +142,21 @@ class MainActivity : AppCompatActivity() {
     private lateinit var btnPickTarget: TextView
     private lateinit var logBody: View
     private lateinit var logChevron: ImageView
+    private lateinit var advancedConnBody: View
+    private lateinit var advancedConnChevron: ImageView
+    private lateinit var advancedConnSubline: TextView
     private lateinit var switchLog: androidx.appcompat.widget.SwitchCompat
     private lateinit var logText: TextView
+    private var logIssuesOnly = false
     private lateinit var carLifeStatus: TextView
     private lateinit var snackbar: TextView
 
     // ---- 英雄卡状态机（1s 轮询 SessionController 对账）----
     private var heroState: HeroState? = null
     private var connectedAt = 0L
+    private var heroVideoSender: VideoSender? = null
+    private var carPlusPictureMissingAt = 0L
+    private var supportsSystemCarPlus = false
     private var hubBlink: ObjectAnimator? = null
 
     // 启动残留屏检查进行中（英雄卡显示「检查中」）；发现的残留暂缓清理时
@@ -189,8 +209,31 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    private val ssidSink: (String) -> Unit = { ssid ->
-        runOnUiThread { ssidInput.setText(ssid) }
+    private var autoFilledSsid = ""
+    private var carHotspotConnected = false
+    private lateinit var carWifiStatus: TextView
+
+    private val ssidSink: () -> Unit = {
+        runOnUiThread { if (!isFinishing && !isDestroyed) refreshCarHotspot() }
+    }
+
+    private fun refreshCarHotspot() {
+        val known = SessionController.knownCarHotspot(this).orEmpty()
+        val entered = ssidInput.text.toString()
+        if (!ssidInput.hasFocus() && (entered.isEmpty() || entered == autoFilledSsid) && entered != known) {
+            autoFilledSsid = known
+            ssidInput.setText(known)
+        }
+        val expected = ssidInput.text.toString().trim()
+        val current = SessionController.currentWifiSsid()
+        carHotspotConnected = expected.isNotEmpty() && SessionController.isOnCarHotspot(expected)
+        val status = when {
+            carHotspotConnected -> "已连上车机热点"
+            current != null -> "当前 WLAN · $current"
+            expected.isNotEmpty() -> "等待连接车机热点"
+            else -> "蓝牙握手后识别车机热点"
+        }
+        if (carWifiStatus.text != status) carWifiStatus.text = status
     }
 
     private val permissionLauncher =
@@ -330,8 +373,7 @@ class MainActivity : AppCompatActivity() {
      * 或直接丢弃广播，表现就是「有时候能自动连、有时候毫无反应」。
      */
     private fun ensureBatteryExempt(force: Boolean = false) {
-        val power = getSystemService(Context.POWER_SERVICE) as PowerManager
-        if (power.isIgnoringBatteryOptimizations(packageName)) return
+        if (isBatteryExempt()) return
         if (!force && !CarApproachPrefs.batteryPromptDue(this)) return
         CarApproachPrefs.markBatteryPrompt(this)
         DarkMessageDialog.show(
@@ -349,6 +391,52 @@ class MainActivity : AppCompatActivity() {
                 },
             ),
         )
+    }
+
+    private fun isBatteryExempt(): Boolean =
+        getSystemService(PowerManager::class.java)?.isIgnoringBatteryOptimizations(packageName) == true
+
+    private fun updateKeepAliveStatus() {
+        findViewById<TextView>(R.id.keepAliveStatus).text =
+            if (isBatteryExempt()) "已豁免电池优化 · 查看其他设置" else "检查电池、自启动和后台锁定"
+    }
+
+    private fun showKeepAliveGuide() {
+        val batteryStatus = if (isBatteryExempt()) "已豁免" else "尚未豁免"
+        DarkMessageDialog.show(
+            activity = this,
+            title = "保活配置检查",
+            message = "电池优化：$batteryStatus。可在应用详情的「耗电管理」允许后台运行。\n\n" +
+                "自启动：在系统设置中搜索「自启动」并允许本应用，部分版本也可以在应用详情的「耗电管理」中设置。\n\n" +
+                "锁定后台：打开最近任务，在本应用卡片的菜单中选择「锁定」。",
+            actions = listOf(
+                DarkMessageDialog.Action("设置电池与后台运行", DarkMessageDialog.Emphasis.PRIMARY) {
+                    if (isBatteryExempt()) openKeepAliveAppDetails() else requestBatteryExemption()
+                },
+                DarkMessageDialog.Action("打开自启动设置") {
+                    val intent = Intent("com.oplus.battery.permission.startup.StartupAppListActivity")
+                        .setPackage("com.oplus.battery")
+                    if (runCatching { startActivity(intent) }.isFailure) {
+                        openKeepAliveAppDetails()
+                    }
+                },
+                DarkMessageDialog.Action("查看后台锁定步骤") {
+                    DarkMessageDialog.show(
+                        activity = this,
+                        title = "锁定后台",
+                        message = "打开手机的最近任务，找到 CarPToCar+ICCOA，点卡片右上角的菜单并选择「锁定」。卡片出现锁图标后，就设置好了。",
+                        actions = listOf(DarkMessageDialog.Action("知道了", DarkMessageDialog.Emphasis.PRIMARY) {}),
+                    )
+                },
+            ),
+        )
+    }
+
+    private fun openKeepAliveAppDetails() {
+        val intent = Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS, Uri.parse("package:$packageName"))
+        if (runCatching { startActivity(intent) }.isFailure) {
+            snack("请在系统设置的应用管理中打开本应用详情", 5_000L)
+        }
     }
 
     /**
@@ -557,6 +645,7 @@ class MainActivity : AppCompatActivity() {
      * 且投屏授权随保活服务停止而失效。
      */
     private fun promptDisconnect() {
+        if (SessionController.disconnecting) return
         DarkMessageDialog.show(
             activity = this,
             title = "断开连接？",
@@ -635,6 +724,13 @@ class MainActivity : AppCompatActivity() {
 
         snack(TIP_MAC_MISSING, 3_600L)
         log("MAC: 本机蓝牙地址未填写——已拦截本次「启动连接」")
+        // 若高级设置处于折叠状态，先自动展开以便用户看清输入框
+        if (::advancedConnBody.isInitialized && advancedConnBody.visibility != View.VISIBLE) {
+            advancedConnBody.visibility = View.VISIBLE
+            if (::advancedConnChevron.isInitialized) {
+                advancedConnChevron.rotation = 180f
+            }
+        }
         // 焦点落到输入框并滚到可视区，用户下一步该做什么一眼可见
         macInput.requestFocus()
         macInput.post {
@@ -665,6 +761,11 @@ class MainActivity : AppCompatActivity() {
                 tvMacHint.text = if (DeviceIdentity.hasOverride(this)) "已保存（手填）：$mac" else "自动解析：$mac"
             }
         }
+        if (::advancedConnSubline.isInitialized) {
+            advancedConnSubline.text =
+                if (mac == null) "未填写本机 MAC（点击展开配置）"
+                else "本机蓝牙地址已设置"
+        }
         if (heroState == HeroState.IDLE) {
             ctaButton.alpha = if (mac == null) CTA_BLOCKED_ALPHA else 1f
             if (pendingResidualDisplays == null) {
@@ -676,6 +777,10 @@ class MainActivity : AppCompatActivity() {
     /** 「启动连接」主体（权限检查留在这里；会话启动交给 [SessionController]，幂等不双开）。 */
     private fun startConnectionNow() {
         runOnUiThread {
+            if (SessionController.disconnecting) {
+                snack("正在断开，请稍候")
+                return@runOnUiThread
+            }
             if (BuildConfig.CAR_PLUS_RUNTIME) CarPlusReceiver.start(this)
             if (ContextCompat.checkSelfPermission(this, Manifest.permission.BLUETOOTH_CONNECT) !=
                 PackageManager.PERMISSION_GRANTED
@@ -705,11 +810,16 @@ class MainActivity : AppCompatActivity() {
         }
         // 旋转/重建：沿用原倒计时截止时刻（onResume 据此续弹）
         disclaimerDeadlineAt = savedInstanceState?.getLong(KEY_DISCLAIMER_DEADLINE, 0L) ?: 0L
+        logIssuesOnly = savedInstanceState?.getBoolean(KEY_LOG_ISSUES_ONLY) == true
+        resolutionHistoryPeer = savedInstanceState?.getString(KEY_RESOLUTION_PEER_ADDRESS)?.let { address ->
+            TargetDevicePrefs.Target(address, savedInstanceState.getString(KEY_RESOLUTION_PEER_NAME) ?: address)
+        }
 
         deviceSubtitle = findViewById(R.id.deviceSubtitle)
         carLifeStatus = findViewById(R.id.carLifeStatus)
+        supportsSystemCarPlus = CarPlusReceiver.hasSystemCarPlus(this)
         findViewById<View>(R.id.openSystemCarPlus).apply {
-            if (CarPlusReceiver.hasSystemCarPlus(this@MainActivity)) {
+            if (supportsSystemCarPlus) {
                 visibility = View.VISIBLE
                 setOnClickListener { openSystemCarPlus() }
             }
@@ -741,8 +851,10 @@ class MainActivity : AppCompatActivity() {
         ctaIcon = findViewById(R.id.ctaIcon)
         ctaLabel = findViewById(R.id.ctaLabel)
         audioTag = findViewById(R.id.audioTag)
-        readyCount = findViewById(R.id.readyCount)
+        readyBluetooth = findViewById(R.id.readyBluetooth)
+        readyWifi = findViewById(R.id.readyWifi)
         ssidInput = findViewById(R.id.ssidInput)
+        carWifiStatus = findViewById(R.id.carWifiStatus)
         macInput = findViewById(R.id.macInput)
         tvMacHint = findViewById(R.id.tvMacHint)
         btDesc = findViewById(R.id.btDesc)
@@ -838,6 +950,7 @@ class MainActivity : AppCompatActivity() {
         renderConsole(SessionController.logText())
 
         setUpUiControls()
+        refreshCarHotspot()
         // 以横屏启动时不会触发 onConfigurationChanged，这里按当前方向定一次排布。
         // 首次调用时 contentArea 未测量（width=0，只能退回屏宽估算），
         // 布局完成后再精确重算一次，避免英雄卡宽度与右栏让位差几个像素。
@@ -991,18 +1104,6 @@ class MainActivity : AppCompatActivity() {
         // 前提是「目标车机」已指定——否则一律不动作，避免误连测试台/其它已配对设备。
         val switchCarApproach =
             findViewById<androidx.appcompat.widget.SwitchCompat>(R.id.switchCarApproach)
-        val carApproachNote = findViewById<TextView>(R.id.carApproachNote)
-        fun renderCarApproachNote() {
-            val target = TargetDevicePrefs.get(this)
-            carApproachNote.text =
-                when {
-                    !switchCarApproach.isChecked -> "关闭后只在打开 App 时自动连接"
-                    target == null -> "未指定目标车机——先在下方「蓝牙配对」里选定车机"
-                    CarApproachPrefs.silentUi(this) ->
-                        "「${target.name}」靠近时自动连接，不弹界面（状态在通知栏）"
-                    else -> "「${target.name}」靠近时自动打开 App 并连接（静默检测，不扫描）"
-                }
-        }
         switchCarApproach.isChecked = CarApproachPrefs.enabled(this)
         renderCarApproachNote()
 
@@ -1080,9 +1181,9 @@ class MainActivity : AppCompatActivity() {
         fun renderBtCompatNote(checked: Boolean) {
             btCompatNote.text =
                 if (checked) {
-                    "已开启：多声明两条 CarPlay 服务 + 蓝牙监听常开（对照日志 BT-PROBE 看车机有没有连占位记录）"
+                    "已开启兼容模式，应用会保持蓝牙监听。"
                 } else {
-                    "默认关闭。开启后多声明两条 CarPlay 服务，并让蓝牙监听常开（界面显示「不支持 Apple CarPlay」的车机可试）"
+                    "车机提示「不支持 Apple CarPlay」时可尝试开启。"
                 }
         }
         switchBtCompat.isChecked = BtCompatPrefs.enabled(this)
@@ -1151,7 +1252,7 @@ class MainActivity : AppCompatActivity() {
         findViewById<TextView>(R.id.btnWifi).setOnClickListener {
             val ssid = ssidInput.text.toString().trim()
             // 自动加入不可用时的手动兜底：密码先进剪贴板，系统 WLAN 页粘贴即可
-            val psk = SessionController.lastWifiPsk
+            val psk = SessionController.hotspotPassword(this, ssid)
             if (psk != null) {
                 val cm = getSystemService(Context.CLIPBOARD_SERVICE) as android.content.ClipboardManager
                 cm.setPrimaryClip(android.content.ClipData.newPlainText("carplay-wifi", psk))
@@ -1174,8 +1275,15 @@ class MainActivity : AppCompatActivity() {
         // 目标车机选择：配对了多台车机时指定唯一目标（只向它发请求/只接受它连入）
         btnPickTarget.setOnClickListener { showTargetPicker() }
 
+        // ---- 折叠区：高级与兼容设置 ----
+        advancedConnBody = findViewById(R.id.advancedConnBody)
+        advancedConnChevron = findViewById(R.id.advancedConnChevron)
+        advancedConnSubline = findViewById(R.id.advancedConnSubline)
+        bindExpandable(R.id.advancedConnHeader, advancedConnBody, advancedConnChevron)
+
         // ---- 折叠卡：日志 ----
         bindExpandable(R.id.logHeader, logBody, logChevron)
+        findViewById<View>(R.id.keepAliveCheck).setOnClickListener { showKeepAliveGuide() }
 
         // 启动残留虚拟屏检测（页面已不再展示 Shell 状态，仅保留自动清理与英雄卡状态联动）
         detectResidualDisplays()
@@ -1190,6 +1298,8 @@ class MainActivity : AppCompatActivity() {
             preferences.edit().putBoolean("logEnabled", checked).apply()
             renderConsole(SessionController.logText())
         }
+        bindLogFilters()
+        renderConsole(SessionController.logText())
         findViewById<ImageView>(R.id.btnClearLog).setOnClickListener {
             // 清除缓冲后必须显式重渲染：日志回调是增量追加语义，clearLog 的通知
             // 无法清 UI（见 SessionController.clearLog 注释，「点了没反应」根因）
@@ -1206,6 +1316,7 @@ class MainActivity : AppCompatActivity() {
             clipboard.setPrimaryClip(ClipData.newPlainText("CarPToCar+ICCOA 日志", text))
             snack("已复制 ${text.length} 字符日志")
         }
+        findViewById<View>(R.id.btnCopyIssueSummary).setOnClickListener { copyIssueSummary() }
         findViewById<ImageView>(R.id.btnExportLog).setOnClickListener { exportLogFile() }
         // 长按导全部历史：默认只导本次启动，历史日志量大时按需手动取
         findViewById<ImageView>(R.id.btnExportLog).setOnLongClickListener {
@@ -1273,6 +1384,18 @@ class MainActivity : AppCompatActivity() {
         refreshMacGate()
     }
 
+    private fun renderCarApproachNote() {
+        val target = TargetDevicePrefs.get(this)
+        findViewById<TextView>(R.id.carApproachNote).text =
+            when {
+                !CarApproachPrefs.enabled(this) -> "关闭后只在打开 App 时自动连接"
+                target == null -> "在「蓝牙配对」中选择要自动连接的车机"
+                CarApproachPrefs.silentUi(this) ->
+                    "「${target.name}」靠近时自动连接，进度显示在通知栏"
+                else -> "「${target.name}」靠近时自动打开 App 并连接"
+            }
+    }
+
     private fun bindExpandable(
         headerId: Int,
         body: View,
@@ -1301,7 +1424,7 @@ class MainActivity : AppCompatActivity() {
     private fun updateCarLifeStatus() {
         val text =
             when {
-                BuildConfig.CAR_PLUS -> if (SessionController.videoSender?.isVideoFlowing == true) {
+                BuildConfig.CAR_PLUS -> if (hasCarPlusPicture(SessionController.videoSender)) {
                     "CarPlay 正在接收 ICCOA Car+ 画面"
                 } else {
                     CarPlusReceiver.status
@@ -1319,21 +1442,27 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun tickHero() {
+        val sender = SessionController.videoSender?.takeIf { it.isRunning }
+        if (sender !== heroVideoSender) {
+            heroVideoSender = sender
+            connectedAt = SystemClock.elapsedRealtime()
+            carPlusPictureMissingAt = 0L
+            lastSentFrames = 0L
+        }
         val s =
             when {
-                SessionController.videoSender?.isRunning == true -> HeroState.CONNECTED
+                sender != null -> HeroState.CONNECTED
                 SessionController.isSessionRunning() || SessionController.sessionStarting.get() ->
                     HeroState.CONNECTING
                 else -> HeroState.IDLE
             }
         if (s != heroState) {
-            if (s == HeroState.CONNECTED) connectedAt = SystemClock.elapsedRealtime()
             heroState = s
             applyHeroState(s)
         }
         // 连接中：副标题跟随阶段提示（英雄卡内即可见，不必划到底部看日志）
         if (s == HeroState.CONNECTING) {
-            heroSubline.text = SessionController.phaseHint ?: DEFAULT_CONNECTING_HINT
+            heroSubline.text = connectingMessage()
         }
         // 启动残留屏检查进行中：状态与副标题临时切换为检查提示
         if (s == HeroState.IDLE && startupCheckRunning) {
@@ -1341,8 +1470,10 @@ class MainActivity : AppCompatActivity() {
             heroSubline.text = "正在检查残留屏…"
             heroProgress.visibility = View.VISIBLE
         }
+        refreshCarHotspot()
         updateConnectedSubline()
         updateHeroStats()
+        if (BuildConfig.CAR_PLUS) refreshResolutionInputs()
         updateDisplayResolutionNote()
         updateAudioTag()
         updateReadyRow()
@@ -1352,6 +1483,16 @@ class MainActivity : AppCompatActivity() {
         // 「荣耀车联提示连接成功、软件显示没连上」的观感来源之一）。
         updateCarLifeStatus()
     }
+
+    private fun connectingMessage(): String =
+        SessionController.reconnectWaitSeconds()?.let {
+            if (it > 0) "车机正在释放上次连接，约 ${it} 秒后自动重连"
+            else "正在重新连接车机…"
+        } ?: SessionController.phaseHint ?: DEFAULT_CONNECTING_HINT
+
+    // Car+ 可以在静止画面时暂时不发新帧。源会话还在线且已发过首帧，就仍在投屏。
+    private fun hasCarPlusPicture(sender: VideoSender?): Boolean =
+        CarPlusReceiver.isSourceConnected && sender?.isRunning == true && sender.framesSentTotal > 0
 
     /**
      * 当前真正在用的码流尺寸。
@@ -1420,17 +1561,36 @@ class MainActivity : AppCompatActivity() {
     /**
      * 「显示」卡片里的分辨率行。
      *
-     * 连接中显示本会话快照（车机 AirPlay `/info` 通告的原值 + 实际码流尺寸）；
-     * 没连接时回落到上一次会话的落盘快照——车机分辨率只有 SETUP 之后才知道，
-     * 不落盘的话断连状态永远是一片空白，用户没法核对「到底按多大在推」。
+     * 显示当前会话的车机通告和码流尺寸。ICCOA 另显示下次连接的设置，
+     * 旧模式在断开后显示上一次会话的记录。
      */
     private fun updateDisplayResolutionNote() {
         val target = displayResolutionNote
         val running = SessionController.videoSender?.isRunning == true
         if (BuildConfig.CAR_PLUS) {
-            val showCurrent = running && SessionController.activeCarWidth > 0
-            target.visibility = if (showCurrent) View.VISIBLE else View.GONE
-            if (!showCurrent) return
+            val nextPeer = TargetDevicePrefs.get(this)
+            val nextSize = DisplayPrefs.carPlusStreamSize(this, nextPeer?.address)
+            val text = buildList {
+                if (running) {
+                    val current = effectiveStreamSize().takeIf { hasCarPlusPicture(heroVideoSender) }
+                    add("当前投屏 · " + (current?.let { "${it.first}×${it.second}" } ?: "等待 Car+ 画面"))
+                    val w = SessionController.activeCarWidth
+                    val h = SessionController.activeCarHeight
+                    if (w > 0 && h > 0 && SessionController.activeCarResolutionFromCar) {
+                        add("车机分辨率 · $w×$h")
+                    } else {
+                        add("车机未提供分辨率")
+                    }
+                }
+                val next = when {
+                    nextPeer == null -> "按连接到的车机应用设置"
+                    nextSize == null -> "${nextPeer.name} · 自动读取"
+                    else -> "${nextPeer.name} · ${nextSize.width}×${nextSize.height}"
+                }
+                add("下次连接 · $next")
+            }.joinToString("\n")
+            if (target.text != text) target.text = text
+            return
         }
         val text =
             if (running && SessionController.activeCarWidth > 0) {
@@ -1439,16 +1599,13 @@ class MainActivity : AppCompatActivity() {
                 val stream = effectiveStreamSize()
                 val confirmed = streamSizeConfirmed()
                 when {
-                    !SessionController.activeCarResolutionFromCar && BuildConfig.CAR_PLUS ->
-                        "车机未通告分辨率" + (stream?.let { " · 码流 ${it.first}×${it.second}" } ?: "")
                     !SessionController.activeCarResolutionFromCar ->
                         "⚑ 车机未通告分辨率 · 按手机横屏 $carW×$carH 兜底"
                     // 还没解析到 SPS：手上的 stream 只是协商档位，不能当成「同尺寸」
                     !confirmed && (stream == null || (stream.first == carW && stream.second == carH)) ->
                         "车机 $carW×$carH · 码流待确认（等首个关键帧）"
                     stream != null && (stream.first != carW || stream.second != carH) ->
-                        "车机 $carW×$carH · 码流 ${stream.first}×${stream.second}" +
-                            if (BuildConfig.CAR_PLUS) "" else "（引擎按档位编码，非车机画布）"
+                        "车机 $carW×$carH · 码流 ${stream.first}×${stream.second}（引擎按档位编码，非车机画布）"
                     else -> "车机 $carW×$carH · 码流同尺寸"
                 }
             } else {
@@ -1512,12 +1669,7 @@ class MainActivity : AppCompatActivity() {
             }
         heroProgress.visibility = if (s == HeroState.CONNECTING) View.VISIBLE else View.GONE
         heroStats.visibility = if (s == HeroState.CONNECTED) View.VISIBLE else View.GONE
-        reconnectCarPlusButton.visibility =
-            if (s == HeroState.CONNECTED && CarPlusReceiver.hasSystemCarPlus(this)) View.VISIBLE else View.GONE
-        val ctaMargin = if (reconnectCarPlusButton.visibility == View.VISIBLE) 8 else 18
-        ctaButton.layoutParams = (ctaButton.layoutParams as LinearLayout.LayoutParams).apply {
-            topMargin = (ctaMargin * resources.displayMetrics.density).toInt()
-        }
+        updateCarPlusReconnectButton(s == HeroState.CONNECTED && supportsSystemCarPlus)
 
         when (s) {
             HeroState.IDLE -> {
@@ -1540,8 +1692,8 @@ class MainActivity : AppCompatActivity() {
                 audioTag.visibility = View.GONE
             }
             HeroState.CONNECTING -> {
-                heroSubline.text = SessionController.phaseHint ?: DEFAULT_CONNECTING_HINT
-                styleCta(R.drawable.bg_cta_fill, R.color.m3_on_primary, R.drawable.ic_close, "取消连接")
+                heroSubline.text = connectingMessage()
+                styleCta(R.drawable.bg_btn_tonal, R.color.m3_on_sec_container, R.drawable.ic_close, "取消连接")
                 audioTag.visibility = View.GONE
             }
             HeroState.CONNECTED -> {
@@ -1579,7 +1731,8 @@ class MainActivity : AppCompatActivity() {
 
     private fun updateConnectedSubline() {
         if (heroState != HeroState.CONNECTED) return
-        val elapsed = SystemClock.elapsedRealtime() - connectedAt
+        val now = SystemClock.elapsedRealtime()
+        val elapsed = now - connectedAt
         val mm = elapsed / 60_000
         val ss = elapsed % 60_000 / 1_000
         val ssid =
@@ -1587,12 +1740,34 @@ class MainActivity : AppCompatActivity() {
                 .toString()
                 .trim()
                 .ifEmpty { "车机热点" }
-        val videoStatus = if (BuildConfig.CAR_PLUS && SessionController.videoSender?.isVideoFlowing != true) {
-            "等待 ICCOA 画面"
-        } else {
-            "视频推流中"
+        val details = String.format(Locale.US, "%s · %02d:%02d", ssid, mm, ss)
+        if (!BuildConfig.CAR_PLUS) {
+            heroSubline.text = "$details · 视频推流中"
+            return
         }
-        heroSubline.text = String.format(Locale.US, "%s · %02d:%02d · %s", ssid, mm, ss, videoStatus)
+        val flowing = hasCarPlusPicture(heroVideoSender)
+        if (flowing) carPlusPictureMissingAt = 0L
+        else if (carPlusPictureMissingAt == 0L) carPlusPictureMissingAt = now
+        val waitingTooLong = !flowing && now - carPlusPictureMissingAt >= CAR_PLUS_PICTURE_WAIT_MS
+        val title = if (flowing) "正在投屏" else "车机已连接"
+        if (heroStateText.text != title) heroStateText.text = title
+        heroSubline.text = when {
+            flowing -> details
+            waitingTooLong -> "Car+ 暂无画面\n$details"
+            else -> "等待 Car+ 画面\n$details"
+        }
+        heroStats.visibility = if (flowing) View.VISIBLE else View.GONE
+    }
+
+    private fun updateCarPlusReconnectButton(visible: Boolean) {
+        val visibility = if (visible) View.VISIBLE else View.GONE
+        if (reconnectCarPlusButton.visibility != visibility) reconnectCarPlusButton.visibility = visibility
+        val params = ctaButton.layoutParams as LinearLayout.LayoutParams
+        val topMargin = ((if (visible) 8 else 18) * resources.displayMetrics.density).toInt()
+        if (params.topMargin != topMargin) {
+            params.topMargin = topMargin
+            ctaButton.layoutParams = params
+        }
     }
 
     private fun bindDisplayCard() {
@@ -1603,7 +1778,7 @@ class MainActivity : AppCompatActivity() {
         val hijackNote = findViewById<TextView>(R.id.carLifeHijackNote)
         hijackSwitch.isChecked =
             if (BuildConfig.CAR_PLUS) BuildConfig.CAR_PLUS_RUNTIME else CarLifeHijack.isEnabled(ctx)
-        hijackSwitch.isEnabled = !BuildConfig.CAR_PLUS
+        if (BuildConfig.CAR_PLUS) hijackSwitch.visibility = View.GONE
 
         fun refreshHijackNote() {
             val running = CarLifeHijack.isActive
@@ -1626,26 +1801,6 @@ class MainActivity : AppCompatActivity() {
             )
         }
 
-        // 「使用车机 GPS」（默认开）：只控制要不要把车机 0xFFFB 定位转成 CarLife 0x18010。
-        // 关掉即回到「完全用手机定位」，随时可来回切（下一条定位就按新值走）。
-        val gpsSwitch = findViewById<SwitchCompat>(R.id.switchCarGps)
-        val gpsNote = findViewById<TextView>(R.id.carGpsNote)
-        gpsSwitch.isEnabled = !BuildConfig.CAR_PLUS
-        gpsSwitch.isChecked = !BuildConfig.CAR_PLUS && CarGpsOption.enabled
-        if (!BuildConfig.CAR_PLUS && !CarGpsOption.enabled) {
-            gpsNote.text = "已关闭：CarLife 只用手机自己的定位（不再接收车机 GPS）。"
-        }
-        gpsSwitch.setOnCheckedChangeListener { _, checked ->
-            CarGpsOption.save(ctx, checked)
-            gpsNote.text =
-                if (checked) {
-                    getString(R.string.car_gps_note)
-                } else {
-                    "已关闭：CarLife 只用手机自己的定位（不再接收车机 GPS）。"
-                }
-            snack(if (checked) "已启用：使用车机 GPS" else "已关闭：只用手机定位")
-        }
-
         if (BuildConfig.CAR_PLUS) bindCarPlusStreamSize() else bindStreamScale()
 
         // 目标帧率没有设置项：车机 /info 报 maxFPS 就跟随，没报按 60（见 video/StreamFps.kt）。
@@ -1662,19 +1817,38 @@ class MainActivity : AppCompatActivity() {
         val width = findViewById<EditText>(R.id.displayWidthInput)
         val height = findViewById<EditText>(R.id.displayHeightInput)
         val note = findViewById<TextView>(R.id.displayScaleNote)
-        fillCarPlusStreamSize(DisplayPrefs.carPlusStreamSize(this))
+        findViewById<View>(R.id.displaySizeTarget).visibility = View.VISIBLE
+        refreshResolutionInputs(force = true)
         note.text = "留空并保存可恢复自动读取 · 下次连接生效"
         findViewById<View>(R.id.btnSaveDisplaySize).setOnClickListener {
+            val peer = resolutionInputPeer ?: return@setOnClickListener
             val w = width.text.toString().trim()
             val h = height.text.toString().trim()
             val size = CarPlusVideo.manualSize(w.toIntOrNull() ?: 0, h.toIntOrNull() ?: 0)
             if (size == null && (w.isNotEmpty() || h.isNotEmpty())) {
                 snack("请输入偶数像素：宽 320–4096，高 180–2304")
             } else {
-                DisplayPrefs.setCarPlusStreamSize(this, size)
-                snack(if (size == null) "已设为自动 · 下次连接生效" else "已保存 ${size.width}×${size.height} · 下次连接生效")
+                DisplayPrefs.setCarPlusStreamSize(this, peer.address, size)
+                updateDisplayResolutionNote()
+                snack(
+                    if (size == null) "${peer.name} 已设为自动读取"
+                    else "${peer.name} 已保存 ${size.width}×${size.height}",
+                )
             }
         }
+    }
+
+    private fun refreshResolutionInputs(force: Boolean = false) {
+        val peer = resolutionHistoryPeer ?: TargetDevicePrefs.get(this)
+            ?: SessionController.activeCarPlusPeer.takeIf { SessionController.isStreaming() }
+        if (!force && resolutionInputPeer == peer) return
+        resolutionInputPeer = peer
+        fillCarPlusStreamSize(DisplayPrefs.carPlusStreamSize(this, peer?.address))
+        findViewById<EditText>(R.id.displayWidthInput).isEnabled = peer != null
+        findViewById<EditText>(R.id.displayHeightInput).isEnabled = peer != null
+        findViewById<View>(R.id.btnSaveDisplaySize).isEnabled = peer != null
+        findViewById<TextView>(R.id.displaySizeTarget).text =
+            peer?.let { "设置对象 · ${it.name}" } ?: "选择蓝牙设备后可手动设置"
     }
 
     private fun fillCarPlusStreamSize(size: CarPlusVideo.Size?) {
@@ -1707,8 +1881,11 @@ class MainActivity : AppCompatActivity() {
                 isEnabled = size != null
                 alpha = if (size == null) 0.45f else 1f
                 if (size != null) setOnClickListener {
-                    fillCarPlusStreamSize(size)
-                    snack(getString(R.string.display_history_filled, size.width, size.height))
+                    DisplayPrefs.setCarPlusStreamSize(this@MainActivity, entry.address, size)
+                    resolutionHistoryPeer = TargetDevicePrefs.Target(entry.address, entry.name)
+                    refreshResolutionInputs(force = true)
+                    updateDisplayResolutionNote()
+                    snack("${entry.name} 已保存 ${size.width}×${size.height}")
                 }
             }
             list.addView(row)
@@ -1817,7 +1994,7 @@ class MainActivity : AppCompatActivity() {
                 override fun onStartTrackingTouch(seekBar: SeekBar?) = Unit
 
                 override fun onStopTrackingTouch(seekBar: SeekBar?) {
-                    snack("触摸节流 ${throttleText(DisplayPrefs.moveThrottleMs(ctx))}")
+                    snack("滑动上报间隔 ${throttleText(DisplayPrefs.moveThrottleMs(ctx))}")
                 }
             },
         )
@@ -1841,74 +2018,52 @@ class MainActivity : AppCompatActivity() {
      * 连接准备计数：已填写热点 SSID、系统已有蓝牙配对设备。
      */
     private fun updateReadyRow() {
-        var ready = 0
-        if (ssidInput.text
-                .toString()
-                .trim()
-                .isNotEmpty()
-        ) {
-            ready++
-        }
+        val target = TargetDevicePrefs.get(this)
         val btGranted =
             ContextCompat.checkSelfPermission(this, Manifest.permission.BLUETOOTH_CONNECT) ==
                 PackageManager.PERMISSION_GRANTED
-        var bondedCount = -1
-        if (btGranted) {
-            try {
-                val adapter =
-                    (getSystemService(Context.BLUETOOTH_SERVICE) as android.bluetooth.BluetoothManager)
-                        .adapter
-                bondedCount = adapter?.bondedDevices?.size ?: -1
-            } catch (_: SecurityException) {
-                bondedCount = -1
+        val adapter = getSystemService(BluetoothManager::class.java)?.adapter
+        val bonded = try {
+            if (btGranted && adapter?.isEnabled == true) adapter.bondedDevices else null
+        } catch (_: SecurityException) {
+            null
+        }
+        val paired = bonded?.any { target == null || TargetDevicePrefs.matches(target, it.address) } == true
+        val bluetoothStatus = when {
+            !btGranted -> "蓝牙未授权"
+            adapter == null -> "蓝牙不可用"
+            bonded == null -> "蓝牙未开启"
+            paired -> "蓝牙已配对"
+            else -> "蓝牙未配对"
+        }
+        val wifiStatus = when {
+            carHotspotConnected -> "车机热点已连接"
+            ssidInput.text.isNotBlank() -> "车机热点未连接"
+            else -> "等待识别车机热点"
+        }
+        if (readyBluetooth.text != bluetoothStatus) readyBluetooth.text = bluetoothStatus
+        if (readyWifi.text != wifiStatus) readyWifi.text = wifiStatus
+        readyBluetooth.setTextColor(getColor(if (paired) R.color.m3_ok else R.color.m3_on_var))
+        readyWifi.setTextColor(getColor(if (carHotspotConnected) R.color.m3_ok else R.color.m3_on_var))
+        btnPickTarget.visibility = if (bonded != null) View.VISIBLE else View.GONE
+        btBadge.visibility = btnPickTarget.visibility
+        if (bonded != null) {
+            btBadge.background.mutate().setTint(getColor(if (paired) R.color.m3_ok_dot else R.color.m3_amber))
+            btBadge.text = when {
+                paired -> "已配对"
+                target != null -> "需重选"
+                else -> "未配对"
             }
         }
-        if (bondedCount > 0) ready++
-
-        btBadge.visibility = if (bondedCount >= 0) View.VISIBLE else View.GONE
-        if (bondedCount >= 0) {
-            val target = TargetDevicePrefs.get(this)
-            if (bondedCount > 0) {
-                btBadge.background.mutate().setTint(getColor(R.color.m3_ok_dot))
-                btBadge.text = "就绪"
-                btDesc.text =
-                    if (target != null) {
-                        "目标「${target.name}」· 只向该设备发请求"
-                    } else if (bondedCount > 1) {
-                        "已配对 $bondedCount 台 · 未指定目标将逐个尝试"
-                    } else {
-                        "已与 $bondedCount 台设备配对 · 连接自动回连"
-                    }
-            } else {
-                btBadge.background.mutate().setTint(getColor(R.color.m3_amber))
-                btBadge.text = "未配对"
-                btDesc.text = "尚未配对——点「选择设备」扫描并配对车机"
-            }
-            // 目标设备已不在已配对列表（如系统里删了配对）时提示重选
-            if (target != null && bondedCount > 0) {
-                val stillBonded =
-                    try {
-                        (getSystemService(Context.BLUETOOTH_SERVICE) as android.bluetooth.BluetoothManager)
-                            .adapter
-                            ?.bondedDevices
-                            ?.any { TargetDevicePrefs.matches(target, it.address) } == true
-                    } catch (_: SecurityException) {
-                        true
-                    }
-                if (!stillBonded) {
-                    btBadge.background.mutate().setTint(getColor(R.color.m3_amber))
-                    btBadge.text = "需重选"
-                    btDesc.text = "目标「${target.name}」已不在配对列表——请重新选择设备"
-                }
-            }
-            // 弹窗内可扫描并直接配对未配对设备，因此不再只在「已有配对」时显示：
-            // 一台都没配对时，这里正是用户的入口。
-            btnPickTarget.visibility = View.VISIBLE
-        } else {
-            btnPickTarget.visibility = View.GONE
+        val description = when {
+            bonded == null -> bluetoothStatus
+            target != null && paired -> "目标「${target.name}」· 只向该设备发请求"
+            target != null -> "目标「${target.name}」已不在配对列表，请重新选择设备"
+            bonded.isEmpty() -> "尚未配对，点「选择设备」扫描并配对车机"
+            bonded.size > 1 -> "已配对 ${bonded.size} 台 · 未指定目标将逐个尝试"
+            else -> "已与 1 台设备配对 · 连接自动回连"
         }
-        readyCount.text = "$ready/2"
-        readyCount.contentDescription = "准备完成 $ready 项，共 2 项：车机热点名称、蓝牙配对"
+        if (btDesc.text != description) btDesc.text = description
     }
 
     // ---- 目标车机选择弹窗（扫描/配对状态）----
@@ -2017,6 +2172,10 @@ class MainActivity : AppCompatActivity() {
                     iconTint = R.color.m3_outline,
                 ) {
                     TargetDevicePrefs.set(this@MainActivity, null)
+                    resolutionHistoryPeer = null
+                    if (BuildConfig.CAR_PLUS) refreshResolutionInputs(force = true)
+                    renderCarApproachNote()
+                    refreshCarHotspot()
                     log("TARGET: 已取消目标指定——出站逐个尝试已配对设备，入站接受任一设备")
                     // 先关弹窗再提示（snackbar 在 Activity 窗口内，会被弹窗盖住）
                     targetPicker?.dismiss()
@@ -2357,6 +2516,8 @@ class MainActivity : AppCompatActivity() {
         if (closePicker) targetPicker?.dismiss()
         val previous = TargetDevicePrefs.get(this)
         TargetDevicePrefs.set(this, TargetDevicePrefs.Target(device.address, name))
+        renderCarApproachNote()
+        refreshCarHotspot()
         log(
             "TARGET: 目标车机已设为「$name」(${device.address})" +
                 "——出站只连该设备、入站拒绝其它设备" +
@@ -2366,13 +2527,10 @@ class MainActivity : AppCompatActivity() {
                     ""
                 },
         )
-        val historySize = if (BuildConfig.CAR_PLUS) CarPlusResolutionHistory.get(this, device.address)?.inputSize else null
-        if (historySize != null) {
-            fillCarPlusStreamSize(historySize)
-            snack(getString(R.string.display_history_filled, historySize.width, historySize.height))
-        } else {
-            snack("目标已设为「$name」——只向该设备发请求")
-        }
+        resolutionHistoryPeer = null
+        if (BuildConfig.CAR_PLUS) refreshResolutionInputs(force = true)
+        updateDisplayResolutionNote()
+        snack("目标已设为「$name」")
         updateReadyRow()
     }
 
@@ -2445,9 +2603,30 @@ class MainActivity : AppCompatActivity() {
 
     private fun sh(cmd: String): String = shExec(cmd).output
 
-    /**
-     * 导出日志到「下载/CarPToCarL/」并弹窗告知位置。
-     */
+    private fun copyIssueSummary() {
+        val target = SessionController.activeCarPlusPeer ?: TargetDevicePrefs.get(this)
+        val sender = SessionController.videoSender
+        val projecting = if (BuildConfig.CAR_PLUS) hasCarPlusPicture(sender) else sender?.isVideoFlowing == true
+        val stage = when {
+            SessionController.disconnecting -> "正在断开连接"
+            projecting -> "正在投屏"
+            sender?.isRunning == true -> "车机已连接，等待${if (BuildConfig.CAR_PLUS) " Car+" else ""}画面"
+            SessionController.isSessionRunning() || SessionController.sessionStarting.get() -> connectingMessage()
+            else -> "未连接"
+        }
+        val summary = ConnectionIssueSummary.format(
+            appName = getString(R.string.app_name),
+            version = AppVersion.nameWithTag(this),
+            target = target?.name ?: "自动选择",
+            currentStage = stage,
+            logs = SessionController.logText(),
+        )
+        val clipboard = getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+        clipboard.setPrimaryClip(ClipData.newPlainText("连接故障摘要", summary))
+        snack("已复制故障摘要")
+    }
+
+    /** 导出日志到下载目录并显示文件位置。 */
     private fun exportLogFile(scope: LogExporter.Scope = LogExporter.Scope.CURRENT_SESSION) {
         snack(if (scope == LogExporter.Scope.ALL) "正在导出全部日志…" else "正在导出本次启动的日志…")
         val fallback = SessionController.logText()
@@ -2609,11 +2788,57 @@ class MainActivity : AppCompatActivity() {
         logText.post { updateLogBottomButton() }
     }
 
-    private fun renderConsole(text: String) {
-        // 改文本前已在底部（或用户上翻阅读中）：决定本次是否自动跟底
-        val follow = consoleAtBottom()
+    private fun bindLogFilters() {
+        val all = findViewById<TextView>(R.id.logFilterAll)
+        val issues = findViewById<TextView>(R.id.logFilterIssues)
+        fun updateSelection() {
+            for (button in listOf(all, issues)) {
+                val selected = (button === issues) == logIssuesOnly
+                button.isSelected = selected
+                button.setBackgroundResource(
+                    if (selected) R.drawable.bg_btn_compact else R.drawable.bg_btn_compact_outline,
+                )
+                button.setTextColor(getColor(if (selected) R.color.m3_on_sec_container else R.color.m3_on_var))
+            }
+        }
+        all.setOnClickListener {
+            logIssuesOnly = false
+            updateSelection()
+            renderConsole(SessionController.logText(), follow = true)
+        }
+        issues.setOnClickListener {
+            logIssuesOnly = true
+            updateSelection()
+            renderConsole(SessionController.logText(), follow = true)
+        }
+        updateSelection()
+    }
+
+    private fun formatConsole(text: String): CharSequence =
+        SpannableStringBuilder().apply {
+            for (line in text.lineSequence()) {
+                if (line.isEmpty()) continue
+                val level = LogDisplayLevel.of(line)
+                if (logIssuesOnly && !level.isIssue) continue
+                val start = length
+                append(line)
+                val color = when (level) {
+                    LogDisplayLevel.NORMAL -> null
+                    LogDisplayLevel.PROTOCOL -> R.color.m3_primary
+                    LogDisplayLevel.WARNING -> R.color.m3_amber
+                    LogDisplayLevel.ERROR -> R.color.m3_error
+                }
+                if (color != null) {
+                    setSpan(ForegroundColorSpan(getColor(color)), start, length, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE)
+                }
+                append('\n')
+            }
+        }
+
+    private fun renderConsole(text: String, follow: Boolean = consoleAtBottom()) {
+        logText.hint = if (logIssuesOnly) "暂无异常日志" else "暂无日志"
         logText.text =
-            if (SessionController.logEnabled) text else "日志采集已关闭（打开「监听日志」开关恢复）"
+            if (SessionController.logEnabled) formatConsole(text) else "日志采集已关闭（打开「监听日志」开关恢复）"
         logText.post {
             if (follow) scrollConsoleToBottom() else updateLogBottomButton()
         }
@@ -2624,12 +2849,15 @@ class MainActivity : AppCompatActivity() {
      * 整段文本，高频日志下 UI/GC 双重放大）。超限时从进程缓冲全量对账一次完成裁剪。
      */
     private fun appendConsole(line: String) {
+        if (!SessionController.logEnabled) return
+        val formatted = formatConsole(line)
+        if (formatted.isEmpty()) return
         val follow = consoleAtBottom()
         if (logText.text.length > 44_000) {
             renderConsole(SessionController.logText())
             return
         }
-        logText.append(line)
+        logText.append(formatted)
         logText.post {
             if (follow) scrollConsoleToBottom() else updateLogBottomButton()
         }
@@ -2857,6 +3085,7 @@ class MainActivity : AppCompatActivity() {
         mainHandler.post(heroTick)
         // 从系统设置/别的界面回来：门禁提示与按钮状态重新对一次（地址可能已补填）
         refreshMacGate()
+        updateKeepAliveStatus()
         // 旋转/重建后尚未接受：用原截止时刻续弹（不重新等 10 秒）
         if (needsDisclaimerAtLaunch(
                 DisclaimerPrefs.acceptedVersion(this),
@@ -2872,6 +3101,11 @@ class MainActivity : AppCompatActivity() {
     override fun onSaveInstanceState(outState: Bundle) {
         super.onSaveInstanceState(outState)
         outState.putLong(KEY_DISCLAIMER_DEADLINE, disclaimerDeadlineAt)
+        outState.putBoolean(KEY_LOG_ISSUES_ONLY, logIssuesOnly)
+        resolutionHistoryPeer?.let {
+            outState.putString(KEY_RESOLUTION_PEER_ADDRESS, it.address)
+            outState.putString(KEY_RESOLUTION_PEER_NAME, it.name)
+        }
     }
 
     /**

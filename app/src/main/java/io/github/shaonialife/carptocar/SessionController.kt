@@ -19,21 +19,18 @@ import io.github.shaonialife.carptocar.bt.BtProfiles
 import io.github.shaonialife.carptocar.bt.BtSessionGate
 import io.github.shaonialife.carptocar.bt.Iap2BluetoothClient
 import io.github.shaonialife.carptocar.bt.Iap2BluetoothServer
+import io.github.shaonialife.carptocar.bt.CarIdleGuard
 import io.github.shaonialife.carptocar.bt.TargetDevicePrefs
 import io.github.shaonialife.carptocar.capture.HiddenDisplaySource
-import io.github.shaonialife.carptocar.carlife.CarGpsFix
 import io.github.shaonialife.carptocar.carlife.CarLifeHijack
 import io.github.shaonialife.carptocar.carplus.CarPlusReceiver
 import io.github.shaonialife.carptocar.carplus.CarPlusVideo
 import io.github.shaonialife.carptocar.carlife.CarLifeProtocol
-import io.github.shaonialife.carptocar.carlife.CarGpsOption
 import io.github.shaonialife.carptocar.carlife.VoiceKeyRouter
 import io.github.shaonialife.carptocar.iap2.CarPlayNowPlaying
 import io.github.shaonialife.carptocar.iap2.Iap2MessageIds
 import io.github.shaonialife.carptocar.iap2.Iap2NowPlaying
 import io.github.shaonialife.carptocar.iap2.Iap2SenderSession
-import io.github.shaonialife.carptocar.iap2.NmeaAssembler
-import io.github.shaonialife.carptocar.iap2.NmeaLocation
 import io.github.shaonialife.carptocar.iap2.ReceiverProfile
 import io.github.shaonialife.carptocar.input.ConsumerKeys
 import io.github.shaonialife.carptocar.input.TouchReports
@@ -487,18 +484,12 @@ object SessionController {
         audioManager.dispatchMediaKeyEvent(KeyEvent(KeyEvent.ACTION_UP, playbackKey))
     }
 
-    /** 车机定位样本合并器：GGA/RMC/GSA 分条到达，必须拼成一份完整快照再下发。 */
-    private val carNmea = NmeaAssembler()
-
-    /** 无定位样本的日志计数（车机 1Hz 推，别刷屏）。 */
-    private var carGpsNoFixFrames = 0
-
     /**
-     * CarLife 控制命令（GPS / 语音键）走独立单线程，队列只留 2 条、满了丢最旧的。
+     * CarLife 语音键命令走独立单线程，队列只留 2 条、满了丢最旧的。
      *
      * 为什么不能在收帧线程直接 `send`：那是一笔**本地 socket 写**，一旦 CarLife 引擎
      * 卡住，写会阻塞 iAP2 收帧线程——而 iAP2 控制通道靠「及时回 ACK」续命（漏 ACK
-     * 车机 10 秒就关通道）。GPS 每秒一条、语音键一次，都是可丢弃/可延迟的数据，
+     * 车机 10 秒就关通道）。语音键命令独立发送，
      * 绝不能让它有能力卡住链路。
      */
     private val carLifeCommandSender =
@@ -533,63 +524,6 @@ object SessionController {
             },
             log = ::appendLog,
         )
-
-    /**
-     * 车机定位 → CarLife（0x18010 `CarlifeCarGps`）。
-     *
-     * 开关见 [CarGpsOption]（设置里「使用车机 GPS」，默认开）。关掉后**一个字节都不发**，
-     * CarLife 继续用手机自己的定位——这是默认行为，也是开关要能回去的状态。
-     *
-     * 只有 [NmeaLocation.Fix.hasPosition] 为真才发：车机在地库/隧道里会持续推一条
-     * 没有经纬度的样本（奥迪就是 `$PASCD,…,C,D,0,…`，fix=0）。把这种样本发给引擎
-     * 会让地图飘到 (0,0)，比不给更糟。
-     */
-    private fun onCarLocation(sentences: List<String>) {
-        if (!CarGpsOption.enabled) return
-        for (sentence in sentences) carNmea.feed(sentence)
-        val merged = carNmea.snapshot() ?: return
-        if (!merged.hasPosition) {
-            carGpsNoFixFrames++
-            if (carGpsNoFixFrames <= 3 || carGpsNoFixFrames % 60 == 0) {
-                appendLog(
-                    "GPS: 车机定位样本无经纬度（${merged.source}，fix=${merged.fixQuality}）" +
-                        "——本次不发 0x18010，CarLife 继续用手机定位" +
-                        if (merged.source == "PASCD") {
-                            "（该车机只发 Apple 私有 \$PASCD，实测形态不含坐标）"
-                        } else {
-                            ""
-                        },
-                )
-            }
-            return
-        }
-        val carFix = toCarGpsFix(merged)
-        carLifeCommandSender.execute { CarLifeHijack.sendCarGps(carFix) }
-    }
-
-    /** NMEA 快照 → CarLife 的单位约定；UTC 日期缺失时用当前 UTC 补（CarLife 只用来标记时刻）。 */
-    private fun toCarGpsFix(fix: NmeaLocation.Fix): CarGpsFix {
-        val now = java.time.ZonedDateTime.now(java.time.ZoneOffset.UTC)
-        return CarGpsFix(
-            latitude = fix.latitude ?: 0.0,
-            longitude = fix.longitude ?: 0.0,
-            altitudeMeters = fix.altitudeMeters,
-            speedKmh = fix.speedKmh,
-            headingDeg = fix.headingDeg,
-            fixQuality = fix.fixQuality,
-            satellitesUsed = fix.satellitesUsed,
-            satellitesVisible = maxOf(fix.satellitesVisible, fix.satellitesUsed),
-            hdop = fix.hdop,
-            pdop = fix.pdop,
-            vdop = fix.vdop,
-            utcYear = if (fix.utcYear > 0) fix.utcYear else now.year,
-            utcMonth = if (fix.utcMonth > 0) fix.utcMonth else now.monthValue,
-            utcDay = if (fix.utcDay > 0) fix.utcDay else now.dayOfMonth,
-            utcHour = if (fix.utcYear > 0 || fix.utcHour > 0) fix.utcHour else now.hour,
-            utcMinute = if (fix.utcYear > 0 || fix.utcMinute > 0) fix.utcMinute else now.minute,
-            utcSecond = if (fix.utcYear > 0 || fix.utcSecond > 0) fix.utcSecond else now.second,
-        )
-    }
 
     /**
      * 清空进程级日志缓冲（UI 刷新是调用方的事：显式 `renderConsole(logText())`）。
@@ -924,6 +858,21 @@ object SessionController {
     @Volatile
     private var sessionWanted: Boolean = false
 
+    private val connectionHandler = android.os.Handler(android.os.Looper.getMainLooper())
+    @Volatile private var pendingBluetoothStart: Runnable? = null
+    private var bluetoothRestartAt = 0L
+    @Volatile var disconnecting = false
+        private set
+
+    fun reconnectWaitSeconds(): Long? {
+        if (pendingBluetoothStart == null) return null
+        val left = (bluetoothRestartAt - android.os.SystemClock.uptimeMillis()).coerceAtLeast(0L)
+        return (left + 999) / 1_000
+    }
+
+    @Volatile var activeCarPlusPeer: TargetDevicePrefs.Target? = null
+        private set
+
     /**
      * 当前连接阶段的一句话提示（英雄卡副标题用，详细过程看日志）。
      * 由各阶段显式设置；null 时 UI 显示默认文案。
@@ -981,6 +930,7 @@ object SessionController {
      * 会话没受伤，重建反而多拆一次链）。
      */
     fun onProcessResumed(frozenMillis: Long) {
+        if (pendingBluetoothStart != null) return
         if (!sessionWanted) {
             appendLog("PROC: 解冻后用户已断开——不自动恢复")
             return
@@ -1111,6 +1061,7 @@ object SessionController {
             return
         }
         Bg.run("bt-compat-listen") {
+            if (compatSuppressed || pendingBluetoothStart != null) return@run
             if (isSessionRunning() || sessionStarting.get()) {
                 // 正在连/已在跑：start() 幂等，顺带把占位记录同步到当前开关状态
                 server.start()
@@ -1137,7 +1088,7 @@ object SessionController {
                     return@Thread
                 }
                 val ctx = appContext ?: continue
-                if (!BtCompatPrefs.enabled(ctx) || compatSuppressed) continue
+                if (!BtCompatPrefs.enabled(ctx) || compatSuppressed || pendingBluetoothStart != null) continue
                 // 连接流程/推流中由它们自己维护监听，这里不插手
                 if (sessionStarting.get() || isStreaming()) continue
                 val server = bluetoothServer ?: continue
@@ -1377,21 +1328,47 @@ object SessionController {
         }
     }
 
-    /**
-     * 最近一次 0x5703 的热点密码（仅内存，不落盘）。
-     * 「车机热点 → 去连接」按钮复制到剪贴板用（手动加入兜底场景）。
-     */
-    @Volatile
-    var lastWifiPsk: String? = null
-
-    /**
-     * 最近一次 0x5703 的**完整**热点凭据：应用专属网络被系统被动断开时用它原地重绑。
-     *
-     * 只存密码不够——重绑要重新走 `WifiNetworkSpecifier`，需要 SSID/安全类型/BSSID。
-     * 与 [lastWifiPsk] 一样只在内存里，不落盘。
-     */
+    /** 最近一次握手下发的热点凭据。密码只留在内存。 */
     @Volatile
     private var lastCarWifi: Iap2SenderSession.WifiConfiguration? = null
+
+    fun knownCarHotspot(context: Context): String? {
+        val target = TargetDevicePrefs.get(context)
+        val recent = lastCarWifi
+        if (target == null || TargetDevicePrefs.matches(target, recent?.bluetoothPeer?.address)) {
+            recent?.ssid?.takeIf { it.isNotBlank() }?.let { return it }
+        }
+        return target?.let { TargetDevicePrefs.hotspotSsid(context, it.address) }
+    }
+
+    fun hotspotPassword(context: Context, ssid: String): String? {
+        val recent = lastCarWifi ?: return null
+        val target = TargetDevicePrefs.get(context)
+        if (ssid != recent.ssid || (target != null && !TargetDevicePrefs.matches(target, recent.bluetoothPeer?.address))) {
+            return null
+        }
+        return recent.passphrase.takeIf { it.isNotEmpty() }
+    }
+
+    fun currentWifiSsid(): String? = wifiConnector?.currentSsid()
+
+    fun isOnCarHotspot(ssid: String): Boolean =
+        (boundCarSsid == ssid && wifiConnector?.currentNetwork != null) ||
+            wifiConnector?.isAssociatedTo(ssid) == true
+
+    private fun rememberCarHotspot(wifi: Iap2SenderSession.WifiConfiguration) {
+        if (wifi.ssid.isBlank()) return
+        val previous = lastCarWifi
+        lastCarWifi = if (previous != null && wifi.passphrase.isEmpty() &&
+            previous.ssid == wifi.ssid && previous.bluetoothPeer?.address == wifi.bluetoothPeer?.address
+        ) {
+            wifi.copy(passphrase = previous.passphrase)
+        } else {
+            wifi
+        }
+        val context = appContext ?: return
+        wifi.bluetoothPeer?.let { TargetDevicePrefs.rememberHotspot(context, it.address, wifi.ssid) }
+    }
 
     /**
      * 本轮会话中 wlan0 是否丢过（被动断开或我们自己的 release）。
@@ -1413,7 +1390,7 @@ object SessionController {
 
     /** 挂屏 UI 钩子：SSID 变化时通知当前 Activity 回填输入框（可空）。 */
     @Volatile
-    var ssidSink: ((String) -> Unit)? = null
+    var ssidSink: (() -> Unit)? = null
 
     /** 挂屏 UI 钩子：重要连接提示（WiFi 未开启/热点加入限制等）弹给用户看。 */
     @Volatile
@@ -1528,7 +1505,7 @@ object SessionController {
 
     /** 会话是否活跃（推出流进程或 BT 任一在跑）。 */
     fun isSessionRunning(): Boolean =
-        videoSender?.isRunning == true ||
+        pendingBluetoothStart != null || videoSender?.isRunning == true ||
             // 「兼容模式」下监听常开：只是挂着等服务 ≠ 有会话。算进去会让自动连接
             // 被自己挡掉、通知栏写成「蓝牙已连上车机」、靠近触发也判成已在跑。
             (bluetoothServer?.isRunning == true && !idleListening) ||
@@ -1542,6 +1519,17 @@ object SessionController {
      * 车机远离后的收摊判定用这个——否则永远判为「会话还在跑」，收摊永不生效。
      */
     fun isStreaming(): Boolean = videoSender?.isRunning == true
+
+    @Volatile
+    private var endedVideoPeerAddress: String? = null
+
+    fun carPlayPeerAddress(): String? =
+        if (sessionWanted) lastGoodEndpoint?.bluetoothPeer?.address ?: lastCarWifi?.bluetoothPeer?.address else null
+
+    fun hasEndedCarVideo(address: String): Boolean =
+        sessionWanted && address.equals(endedVideoPeerAddress, ignoreCase = true)
+
+    fun hasCarWorkToStop(): Boolean = sessionWanted || isSessionRunning() || idleListening
 
     /**
      * 通知栏的一句话状态（[io.github.shaonialife.carptocar.service.CarPlayService] 每 3 秒取一次）。
@@ -1568,11 +1556,15 @@ object SessionController {
      * 幂等：已有会话时 BT 组件的 start() 自行短路，不会双开。
      */
     fun startConnection(context: Context) {
+        if (disconnecting || pendingBluetoothStart != null) return
         if (BuildConfig.CAR_PLUS && !BuildConfig.CAR_PLUS_RUNTIME) {
             appendLog("ICCOA: 编译验证包缺少车端 SDK，无法启动 ICCOA → CarPlay 会话")
             return
         }
+        CarIdleGuard.cancel(context)
         connectCancelled = false
+        endedVideoPeerAddress = null
+        lastGoodEndpoint = null
         // 新一轮 = 新的一致性审计：清空上一轮的问题清单，并把输出口接到本控制器的
         // appendLog（logcat + 文件 + 界面三路都走它，用户导出日志即带走整份清单）。
         ProtocolAudit.reset()
@@ -1606,17 +1598,29 @@ object SessionController {
         resetNowPlayingDedupe()
         CarPlayService
             .start(context)
-        // 能力发布先于连接（catplay 的做法：CarPlayCtrlServer 在会话一开始就常驻广播
-        // `_carplay-ctrl._tcp`，之后每 1s force_announce，收到车机邀请才建 AirPlay）。
-        // 我们此前要等 0x5703 才注册，导致「车机发现手机」这一步总落在热点绑定之后，
-        // 每轮多花 1~3 秒；现在启动连接即发布，换网时 ensureForNetwork 会自动重注册。
-        ctrlAdvertiser?.resetInviteCount()
-        // 后台发布：start() 首次要读真实蓝牙 MAC（可能走 shell），不能在主线程做
-        Bg.run("ctrl-publish") { ctrlAdvertiser?.start() }
-        // 真车路径：手机主动连车机（SDP …caff 配件服务）
-        // 测试台路径：监听手机侧 iPhone UUID，等 DiPlay/xcertplay 回连
-        bluetoothClient?.start()
-        bluetoothServer?.start()
+        val target = TargetDevicePrefs.get(context)
+        val delay = BtSessionGate.manualStopCooldownLeft(target?.address)
+        val startBluetooth = Runnable {
+            pendingBluetoothStart = null
+            bluetoothRestartAt = 0L
+            if (sessionWanted && !connectCancelled) {
+                phaseHint = "蓝牙就绪，等待车机回连…"
+                ctrlAdvertiser?.resetInviteCount()
+                // 首次广播要读取真实蓝牙地址，留在后台。
+                Bg.run("ctrl-publish") { if (sessionWanted) ctrlAdvertiser?.start() }
+                bluetoothServer?.start()
+                bluetoothClient?.start()
+            }
+        }
+        if (delay > 0) {
+            phaseHint = "车机正在释放上次连接，稍后会自动重连"
+            appendLog("BT: 等待车机释放上次连接（${(delay + 999) / 1_000} 秒），然后恢复双向连接")
+            bluetoothRestartAt = android.os.SystemClock.uptimeMillis() + delay
+            pendingBluetoothStart = startBluetooth
+            connectionHandler.postDelayed(startBluetooth, delay)
+        } else {
+            startBluetooth.run()
+        }
         // 诊断（奥迪实测：手机与车机「蓝牙已连接」时车机不开放 CarPlay）：
         // 连之前把目标设备的蓝牙配置文件状态打出来，失败时一眼看出是不是这个原因。
         Bg.run("bt-profile-diag") {
@@ -1630,19 +1634,23 @@ object SessionController {
     }
 
     /** 「断开连接」（可在任意 Activity 实例上调用——操作的是真管线对象）。 */
-    fun disconnect(context: Context) {
-        val hadProjection = CarPlayService.mediaProjection != null
+    fun disconnect(context: Context, carDeparted: Boolean = false, graceful: Boolean = true) {
+        if (disconnecting) return
+        CarIdleGuard.cancel(context)
+        pendingBluetoothStart?.let(connectionHandler::removeCallbacks)
+        pendingBluetoothStart = null
+        bluetoothRestartAt = 0L
+        connectCancelled = true
+        val activeClient = currentClient?.takeIf { isStreaming() }
+        val peer = carPlayPeerAddress()
+        val keepAllPlayChannel = graceful && !carDeparted &&
+            activeClient?.receiverIdentity()?.startsWith("AllPlay ", ignoreCase = true) == true
         // 用户终态：解冻恢复不得再自动把会话拉起来
         sessionWanted = false
         // 兼容模式的常开监听也一并停在这里；记下「用户叫停过」，
         // 否则看门狗 30 秒后又把监听挂回来（用户会以为断开没生效）
         compatSuppressed = true
         idleListening = false
-        // 记下这一刀的时刻：车机固件 `mediaDisconnectTimeout=15000ms`，设备没被判
-        // 「已移除」之前它只重开旧会话、不启动 AirPlay。出站循环据此强制冷却
-        // （见 BtSessionGate.REACTIVATE_COOLDOWN_MILLIS）——否则用户断开后立刻
-        // 再点「启动连接」，就会稳稳落在「给热点凭据但不开 7000 端口」的那条路上。
-        BtSessionGate.noteManualStop()
         // 用户终态同样作废排队中的自动重试——它醒来第一件事就是检查 sessionWanted，
         // 但先让令牌变一次，日志就能明确写出「用户已断开，本次重试作废」
         synchronized(connectRetryLock) {
@@ -1650,26 +1658,57 @@ object SessionController {
             connectRetryScheduled = false
             connectRetryAttempt = 0
         }
-        SessionTrace.sessionEnd("用户手动断开")
         pendingEndpointUpdate = null
-        if (BuildConfig.CAR_PLUS) CarPlusReceiver.stop()
+        val finish = Runnable {
+            finishDisconnect(context, carDeparted, keepAllPlayChannel)
+            if (!carDeparted && activeClient != null && !keepAllPlayChannel) {
+                BtSessionGate.noteManualStop(peer)
+            }
+            disconnecting = false
+        }
+        if (graceful && !carDeparted && activeClient != null) {
+            disconnecting = true
+            // The RTSP response is bounded, and closing the old socket also unblocks a stuck write.
+            connectionHandler.postDelayed(finish, 1_500L)
+            Bg.run("airplay-teardown") {
+                try {
+                    activeClient.teardown()
+                } finally {
+                    connectionHandler.post {
+                        if (disconnecting && currentClient === activeClient) {
+                            connectionHandler.removeCallbacks(finish)
+                            finish.run()
+                        }
+                    }
+                }
+            }
+        } else {
+            finish.run()
+        }
+    }
+
+    private fun finishDisconnect(context: Context, carDeparted: Boolean, keepAllPlayChannel: Boolean) {
+        val hadProjection = CarPlayService.mediaProjection != null
+        SessionTrace.sessionEnd(if (carDeparted) "车机离线" else "用户手动断开")
+        if (BuildConfig.CAR_PLUS) CarPlusReceiver.stop(stopNative = carDeparted)
         retireSession()
         // BT 控制会话只在这里（用户终态）退役，socket close 让保活读循环立刻退出：
         // 否则它阻塞到对端超时（实测 ~24s）才结束，用户取消后英雄卡持续转圈。
         // 配对中绝不能断——DiPlay 在隧道 iAP2 就绪前看到 RFCOMM 断开即判
         // bring-up failed 并拆整轮无线栈（含推流中的 AirPlay 会话，2026-10-16 实测）。
-        detachActiveBtSessions()
         phaseHint = null
-        CarPlayService
-            .stop(context)
-        bluetoothServer?.stop()
+        CarPlayService.stop(context)
+        if (keepAllPlayChannel) bluetoothServer?.pauseForReconnect() else bluetoothServer?.stop()
         bluetoothClient?.stop()
         ctrlAdvertiser?.stop()
         endpointBrowser?.stop()
         wifiConnector?.release()
         wifiWatchdog?.stop()
         boundCarSsid = null
-        if (hadProjection) {
+        sessionStarting.set(false)
+        if (carDeparted) {
+            appendLog("已停止车机连接、监听和保活服务")
+        } else if (hadProjection) {
             // Android 14+：MediaProjection 与保活服务（mediaProjection FGS 类型）绑定，
             // 停服务会连带失效授权——下次连接需重新点「申请投屏权限」
             appendLog("已手动断开并停止保活服务（常亮已恢复）；投屏授权已随服务停止失效，下次连接如需声音请重新申请")
@@ -1711,6 +1750,7 @@ object SessionController {
         if (BuildConfig.CAR_PLUS) CarPlusReceiver.stopVideo(videoSender)
         videoSender?.stop()
         videoSender = null
+        activeCarPlusPeer = null
         // 暗幕/常亮随会话收掉（本方法在每轮配对起步也会执行，新一轮推流起来后会重新置位）
         ScreenDimmer.setSessionActive(false)
         if (BuildConfig.CAR_PLUS_AUDIO_RELAY) CarPlusReceiver.stopAudio()
@@ -1776,20 +1816,17 @@ object SessionController {
      * 因此这里必须：绑车机 WiFi → 广播 ctrl；晚于 0x4300 则双方互等死锁（Audi 实测）。
      */
     fun onWifiCredentials(wifi: Iap2SenderSession.WifiConfiguration) {
+        if ((compatSuppressed && !sessionWanted) || wifi.ssid.isBlank()) return
+        rememberCarHotspot(wifi)
+        ssidSink?.invoke()
         // 会话推流中收到的 0x5703 是冗余凭据（DiPlay 控制器周期重连会重发一轮
         // Phase 1，2026-10-15 实测「连上后自动断开」循环的推手之一）：此时再走绑定
         // 流程会 release+重绑进程网络（扰动正在推流的 socket）、force 重注册 ctrl
         // mDNS（DiPlay 视为手机重新上线、再拉一轮 RFCOMM）。只刷新密码缓存。
         if (videoSender?.isRunning == true) {
-            lastWifiPsk = wifi.passphrase
-            lastCarWifi = wifi
             appendLog("0x5703 冗余凭据（会话推流中）——保持现有 WiFi 绑定与 ctrl 广播不变")
             return
         }
-        ssidSink?.invoke(wifi.ssid)
-        lastWifiPsk = wifi.passphrase
-        // 完整凭据留给「网络被动断开后自动重绑」用（见 onCarWifiLost）
-        lastCarWifi = wifi
         phaseHint = "拿到车机热点凭据，绑定 WiFi…"
         appendLog(">>> 拿到车机热点凭据（0x5703）——立即绑定 WiFi + 广播 _carplay-ctrl")
         // ctrl 广播已在 startConnection 时发布（catplay：连接前保持发布能力在线）。
@@ -3819,6 +3856,7 @@ object SessionController {
         source: String,
     ) {
         val context = appContext ?: return
+        if (compatSuppressed && !sessionWanted) return
         // 冗余端点防护：接收端控制器（DiPlay 实测）在我们配对推流后才完成既有的
         // RFCOMM 重连并重发 0x4301。此时重启配对会 retireSession 掉健康会话
         // （编码器 stop 竞态 = 「连上后自动断开」循环的根因）。推流中的端点一律忽略；
@@ -3875,11 +3913,12 @@ object SessionController {
         // 解冻恢复只能靠这份快照重走交接（见 onProcessResumed）。
         lastGoodEndpoint = endpoint
         phaseHint = "蓝牙已连上车机，解析热点地址…"
-        ssidSink?.invoke(endpoint.ssid)
-        // 0x4301 同样带热点密码（BMW iD9 不发 0x5703，AP 信息只走这条路）。
-        // 不缓存的话首页「WiFi」按钮会判成「尚未拿到热点密码」，用户连手动加入
-        // 都做不了——2026-10-29 日志里连着出现三次这条误导性提示，根因就是这里。
-        if (endpoint.passphrase.isNotEmpty()) lastWifiPsk = endpoint.passphrase
+        rememberCarHotspot(
+            Iap2SenderSession.WifiConfiguration(
+                endpoint.ssid, endpoint.passphrase, endpoint.channel, endpoint.securityType, endpoint.bluetoothPeer,
+            ),
+        )
+        ssidSink?.invoke()
         // 诊断（老车机排查必看）：地址是 IPv4 还是只有 IPv6、TXT features 是否声明配对能力。
         // 奥迪 4xxx 两种「连不上」都源于这里——旧版日志里完全没有这两项。
         val addresses = endpoint.ipAddresses
@@ -4061,13 +4100,6 @@ object SessionController {
                                     voiceKey.onHidUp("iAP2 0x6802 0xCF")
                                 }
                             }
-                            // 车机定位（0xFFFB）→ CarLife 0x18010。只在开关打开且
-                            // 车机真的给了经纬度时才发（见 onCarLocation）。
-                            created.onLocationSamples = { sentences -> onCarLocation(sentences) }
-                            // 新一轮会话：清掉上一轮的定位，别把停车前的位置当成本次定位；
-                            // 语音键的按下状态也别跨会话带过来。
-                            carNmea.reset()
-                            carGpsNoFixFrames = 0
                             voiceKey.reset()
                             // 0x5001 NowPlayingUpdate 的数据源：优先系统媒体会话，兜底 CarLife
                             // 0x10035。读不到（null）时虚拟链路自动退化为空态。
@@ -4301,7 +4333,10 @@ object SessionController {
                         }
                         if (setup != null) {
                             connectBudget.enter(ConnectStage.FIRST_FRAME)
-                            val manualCarPlusSize = if (BuildConfig.CAR_PLUS) DisplayPrefs.carPlusStreamSize(context) else null
+                            val carPlusPeer = client.currentEndpoint.bluetoothPeer ?: endpoint.bluetoothPeer
+                            val manualCarPlusSize = if (BuildConfig.CAR_PLUS) {
+                                DisplayPrefs.carPlusStreamSize(context, carPlusPeer?.address)
+                            } else null
                             val carPlusTouchWidth = if (setup.displayFromCar) setup.displayWidth else manualCarPlusSize?.width ?: setup.displayWidth
                             val carPlusTouchHeight = if (setup.displayFromCar) setup.displayHeight else manualCarPlusSize?.height ?: setup.displayHeight
                             // 记录会话凭据：投影授权晚于连接时用于动态补启音频。
@@ -4746,6 +4781,7 @@ object SessionController {
                                         } else {
                                             manualCarPlusSize?.let { it.width to it.height }
                                         }
+                                    endedVideoPeerAddress = null
                                     videoSender =
                                         VideoSender(
                                             host = host,
@@ -4805,7 +4841,14 @@ object SessionController {
                                                 }
                                                 // 音频拆链归因：起过音频却很快被拆 → 记下该档位
                                                 // 不兼容，下次连接自动换档（见 attributeAudioTeardown）。
-                                                attributeAudioTeardown()
+                                                if (sessionWanted && currentClient === client) {
+                                                    attributeAudioTeardown()
+                                                    val address = effectiveEndpoint.bluetoothPeer?.address
+                                                        ?: endpoint.bluetoothPeer?.address
+                                                        ?: TargetDevicePrefs.get(context)?.address
+                                                    endedVideoPeerAddress = address
+                                                    CarIdleGuard.onCarVideoEnded(context, address)
+                                                }
                                             },
                                         )
                                     // 先连端口（车机看门狗），编码器等 RECORD 后再启动
@@ -4846,14 +4889,14 @@ object SessionController {
                                 // 「连不上」的现场，正常连接不需要快照（省空间也省导出体积）。
                                 SessionTrace.markLinked()
                                 if (BuildConfig.CAR_PLUS) {
+                                    activeCarPlusPeer = carPlusPeer
                                     val started = videoSender?.let {
                                         CarPlusReceiver.startVideo(
                                             it, client.receiverIdentity(), activeStreamWidth, activeStreamHeight,
                                         )
                                     } == true
-                                    val peer = client.currentEndpoint.bluetoothPeer
-                                    if (started && setup.displayFromCar && peer != null) {
-                                        CarPlusResolutionHistory.record(context, peer, setup.displayWidth, setup.displayHeight)
+                                    if (started && setup.displayFromCar && carPlusPeer != null) {
+                                        CarPlusResolutionHistory.record(context, carPlusPeer, setup.displayWidth, setup.displayHeight)
                                     }
                                     appendLog(
                                         if (started) "ICCOA: CarPlay 视频通道已就绪，等待 Car+ 画面"
@@ -5022,11 +5065,6 @@ object SessionController {
                 endpoint.channel,
                 endpoint.securityType,
             )
-        // 被动断开后的自动重绑要的是「完整凭据」，而 0x4301 里就有一份（BMW iD9 /
-        // 通用车机根本不发 0x5703，AP 信息只走这条路）。旧实现只在 onWifiCredentials
-        // 里记 lastCarWifi —— 这类车型上 onCarWifiLost 永远走「没凭据，只能提示」，
-        // 1.2.10 加的自动重绑对它们等于不存在（只有 0x5703 车型才生效）。
-        lastCarWifi = wifiConfig
         if (boundCarSsid == endpoint.ssid && wifiConnector?.currentNetwork != null) {
             appendLog(">>> [$source] 已绑定车机热点 ${endpoint.ssid}，跳过重复绑定")
             continueWithNetwork(true)
@@ -5065,7 +5103,10 @@ object SessionController {
                             // 这里再给建议通道一个短窗口：真连上了就直接绑，省掉弹窗。
                             val bySuggestion =
                                 if (connector != null && !connectCancelled) {
-                                    connector.bindCurrentWifiBlocking(SUGGESTION_JOIN_WAIT_MS) { connectCancelled }
+                                    connector.bindCurrentWifiBlocking(
+                                        SUGGESTION_JOIN_WAIT_MS,
+                                        expectedSsid = wifiConfig.ssid,
+                                    ) { connectCancelled }
                                 } else {
                                     null
                                 }

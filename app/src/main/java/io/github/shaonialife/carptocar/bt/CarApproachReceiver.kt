@@ -77,34 +77,32 @@ class CarApproachReceiver : BroadcastReceiver() {
         context: Context,
         intent: Intent,
     ) {
-        val target = TargetDevicePrefs.get(context) ?: return
         val address = addressOf(context, intent) ?: return
-        if (!address.equals(target.address, ignoreCase = true)) return
-        CarApproachPrefs.setAclConnected(context, false)
-        if (CarApproachPrefs.suppressed(context) || CarApproachPrefs.lastTriggerAt(context) > 0L) {
-            CarApproachPrefs.setSuppressed(context, false)
-            CarApproachPrefs.markTriggered(context, 0L)
-            DebugFileLog.append(context, "APPROACH: 车机蓝牙链路断开——已复位，下次靠近可再次自动启动")
+        val target = TargetDevicePrefs.get(context)
+        val activeAddress = SessionController.carPlayPeerAddress()
+        if (!address.equals(activeAddress ?: target?.address, ignoreCase = true)) return
+        if (target != null && TargetDevicePrefs.matches(target, address)) {
+            CarApproachPrefs.setAclConnected(context, false)
+            if (CarApproachPrefs.suppressed(context) || CarApproachPrefs.lastTriggerAt(context) > 0L) {
+                CarApproachPrefs.setSuppressed(context, false)
+                CarApproachPrefs.markTriggered(context, 0L)
+            }
         }
-        // 先排闹钟再写日志：日志是同步磁盘 IO，不该挡在「30 秒后能自愈」这件事前面。
-        CarIdleGuard.schedule(context)
-        DebugFileLog.append(
-            context,
-            "APPROACH: 车机蓝牙链路断开——30 秒内未回连将结束会话并退出进程（静默检测保留，下次靠近仍会拉起）",
-        )
+        DebugFileLog.append(context, "APPROACH: 车机蓝牙链路断开")
+        CarIdleGuard.onCarDisconnected(context, address)
     }
 
     private fun onConnected(
         context: Context,
         intent: Intent,
     ) {
-        val target = TargetDevicePrefs.get(context) ?: return
         val address = addressOf(context, intent)
+        if (address != null) CarIdleGuard.onCarConnected(context, address)
+        val target = TargetDevicePrefs.get(context) ?: return
         // 链路是物理事实：只要连上的是目标车机，就先记状态、撤计时——
         // 哪怕下面判定为「已有会话 / 刚断开过」不拉起界面，这次回连也算数。
         if (address != null && address.equals(target.address, ignoreCase = true)) {
             CarApproachPrefs.setAclConnected(context, true)
-            CarIdleGuard.cancel(context)
         }
         val sessionRunning = SessionController.isSessionRunning() || SessionController.sessionStarting.get()
         val decision =

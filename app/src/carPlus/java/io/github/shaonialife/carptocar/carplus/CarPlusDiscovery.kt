@@ -123,12 +123,16 @@ internal class CarPlusDiscovery(context: Context) : ContextWrapper(context) {
         }
     }
 
-    fun stopWatching() = synchronized(lock) {
+    fun stopWatching(stopNative: Boolean = false) = synchronized(lock) {
         generation++
         watchRequestedAt = 0L
         reconnectQueued = false
         watcher?.let { process ->
-            runCatching { process.outputStream.close() }.onFailure { process.destroy() }
+            runCatching {
+                process.outputStream.use { control ->
+                    if (stopNative) control.write("stop-native\n".toByteArray(Charsets.US_ASCII))
+                }
+            }.onFailure { process.destroy() }
         }
         watcher = null
     }

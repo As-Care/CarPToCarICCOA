@@ -46,6 +46,17 @@ object TargetDevicePrefs {
         }
     }
 
+    fun hotspotSsid(context: Context, address: String): String? =
+        context.getSharedPreferences("car_hotspots", Context.MODE_PRIVATE)
+            .getString(address.uppercase(java.util.Locale.ROOT), null)
+
+    fun rememberHotspot(context: Context, address: String, ssid: String) {
+        if (ssid.isNotBlank() && hotspotSsid(context, address) != ssid) {
+            context.getSharedPreferences("car_hotspots", Context.MODE_PRIVATE)
+                .edit().putString(address.uppercase(java.util.Locale.ROOT), ssid).apply()
+        }
+    }
+
     fun matches(
         target: Target,
         address: String?,

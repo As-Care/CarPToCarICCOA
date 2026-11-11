@@ -126,6 +126,12 @@ final class ColorOsRelay implements AutoCloseable {
         nativePid = 0;
     }
 
+    synchronized int releaseNativeProcess() {
+        int pid = nativePid;
+        stop();
+        return pid;
+    }
+
     @Override public synchronized void close() {
         stop();
         if (directory == null) return;

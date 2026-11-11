@@ -1723,14 +1723,6 @@ class AirPlayClient(
      */
     var onHidKeysReleased: ((Set<Int>) -> Unit)? = null
 
-    /**
-     * 车机定位回调（iAP2 `0xFFFB LocationInformation`，~1Hz）。
-     *
-     * 通路：隧道 iAP2 控制会话 → 0xFFFB → [VirtualIap2Link] 抽出 NMEA 句子 →
-     * 本回调。由 SessionController 注入，转成 CarLife 的 0x18010 发给 CarLife+。
-     * null = 只记日志、不转发。
-     */
-    var onLocationSamples: ((List<String>) -> Unit)? = null
 
     /**
      * 「正在播放」信息提供者（歌名/歌手/专辑/播放状态），供虚拟 iAP2 链路的 0x5001
@@ -1763,7 +1755,6 @@ class AirPlayClient(
                 ).also {
                     it.onMediaKey = { keyCode -> onMediaKey?.invoke(keyCode) }
                     it.onHidKeysReleased = { usages -> onHidKeysReleased?.invoke(usages) }
-                    it.onLocationSamples = { sentences -> onLocationSamples?.invoke(sentences) }
                     it.begin()
                     iapLink = it
                 }
@@ -2801,6 +2792,22 @@ class AirPlayClient(
         // 时序：screen SETUP → phone detect on control → HU SYN on control）。见 armMib3VirtualLink。
         armMib3VirtualLink()
         return ScreenStreamInfo(connectionId, dataPort, cipher)
+    }
+
+    /** End the complete session before its control connection is closed. */
+    fun teardown() {
+        try {
+            val (status, _) = request(
+                "TEARDOWN",
+                "/",
+                BinaryPlist.encode(emptyMap<String, Any?>()),
+                timeoutMillis = 1_000,
+                contentType = "application/x-apple-binary-plist",
+            )
+            log("AIRPLAY: TEARDOWN 应答 [$status]")
+        } catch (error: IOException) {
+            log("AIRPLAY: TEARDOWN 未完成，关闭本机通道 - ${error.message}")
+        }
     }
 
     /** RECORD：激活会话（接收端 onSessionActive）。路径用相对 `/`（catplay record() 同款）。 */

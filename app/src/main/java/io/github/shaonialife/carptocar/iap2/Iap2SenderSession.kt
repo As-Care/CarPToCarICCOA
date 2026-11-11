@@ -426,9 +426,9 @@ class Iap2SenderSession(
         return identification.body.decodeToString().contains("Cinemo", ignoreCase = true)
     }
 
-    fun run(timeoutMillis: Long = 60_000L): CarPlayEndpoint {
+    fun run(timeoutMillis: Long = 60_000L, linkTimeoutMillis: Long = timeoutMillis): CarPlayEndpoint {
         val deadline = System.nanoTime() + timeoutMillis * 1_000_000L
-        if (!channel.awaitReady(remainingMillis(deadline))) {
+        if (!channel.awaitReady(minOf(linkTimeoutMillis, remainingMillis(deadline)))) {
             throw IOException("iAP2 链路协商超时")
         }
         log("iap2 link ready peerMaxControl=${channel.peerMaxControlPayload()}")
@@ -1643,6 +1643,7 @@ class Iap2SenderSession(
         val passphrase: String,
         val channel: Int,
         val securityType: Int,
+        val bluetoothPeer: TargetDevicePrefs.Target? = null,
     )
 
     private fun parseWifiConfiguration(frame: Iap2Csm.Frame): WifiConfiguration {

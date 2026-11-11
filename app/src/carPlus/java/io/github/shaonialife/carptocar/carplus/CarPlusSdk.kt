@@ -40,6 +40,7 @@ internal object CarPlusSdk {
     private var advertising = false
     private var advertisingAttempt = 0
     private var connected = false
+    val isConnected: Boolean get() = connected
     private var autoReconnectPending = false
     private var reconnectDeadline: Runnable? = null
     private var reconnectAfterDisconnect = false
@@ -62,7 +63,6 @@ internal object CarPlusSdk {
 
         override fun onConnectStateChanged(id: String?, state: Int, parameter: Int) = onMain {
             if (wanted) {
-                report?.invoke(null, "会话状态 $state ($parameter)")
                 when (state) {
                     UCarConnectState.UCAR_DEVICE_DISCONNECT -> {
                         if (connected) {
@@ -87,6 +87,7 @@ internal object CarPlusSdk {
                         if (surface == null && !encodedOutput) updateStatus("ICCOA 已连接 · 等待 CarPlay 视频通道")
                     }
                 }
+                report?.invoke(null, "会话状态 $state ($parameter)")
             }
         }
 
@@ -240,7 +241,7 @@ internal object CarPlusSdk {
         }
     }
 
-    fun stop() {
+    fun stop(stopNative: Boolean = false) {
         if (!wanted && !hasVideoOutput()) return
         wanted = false
         autoReconnectPending = false
@@ -255,7 +256,7 @@ internal object CarPlusSdk {
         // Keep the local relay alive for the SDK's disconnect handshake.
         runCatching { adapter?.disconnect() }
         runCatching { adapter?.stopAdvertise() }
-        discovery?.stopWatching()
+        discovery?.stopWatching(stopNative)
         connected = false
         advertising = false
         updateStatus("ICCOA 接收端已停止 · 点此启动")

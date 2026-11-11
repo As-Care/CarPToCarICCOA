@@ -8,6 +8,7 @@ import io.github.shaonialife.carptocar.video.VideoSender
 @Suppress("UNUSED_PARAMETER")
 internal object CarPlusReceiver {
     val status: String get() = ""
+    val isSourceConnected: Boolean get() = false
 
     fun start(context: Context, refresh: Boolean = false) = Unit
 
@@ -35,5 +36,5 @@ internal object CarPlusReceiver {
 
     fun hasRecentMusic() = false
 
-    fun stop() = Unit
+    fun stop(stopNative: Boolean = false) = Unit
 }

@@ -292,6 +292,7 @@ class Iap2BluetoothClient(
         ContextCompat.checkSelfPermission(context, Manifest.permission.BLUETOOTH_CONNECT) ==
             PackageManager.PERMISSION_GRANTED
 
+    @Synchronized
     fun start(): Boolean {
         if (running) return true
         if (!hasPermission()) {
@@ -356,15 +357,9 @@ class Iap2BluetoothClient(
             // 结果是我们拿网关兜底、8 次重连全超时（fe80::1086:…:7000 after 2000ms）。
             //
             // 等够 [BtSessionGate.REACTIVATE_COOLDOWN_MILLIS] 再拨，这一次才是「新建会话」。
-            val cooldownLeft = BtSessionGate.REACTIVATE_COOLDOWN_MILLIS - BtSessionGate.sinceManualStop()
+            val cooldownLeft = BtSessionGate.manualStopCooldownLeft(targetProvider()?.address)
             if (cooldownLeft > 0) {
-                log(
-                    "BT-C: 距上次手动断开只有 ${BtSessionGate.sinceManualStop() / 1000} 秒——" +
-                        "车机要 ${BtSessionGate.REACTIVATE_COOLDOWN_MILLIS / 1000} 秒才认为设备已移除" +
-                        "（固件 mediaDisconnectTimeout=15s），先等 ${(cooldownLeft + 999) / 1000} 秒再发起" +
-                        "（早了它只重开旧会话：给热点凭据，但不启动 AirPlay）",
-                )
-                sleepQuietly(cooldownLeft + 200)
+                sleepQuietly(cooldownLeft)
                 continue
             }
             // 静默降噪（2026-10-10 用户实测后启用）——会话期间完全静默，不产生任何连接尝试/日志：
@@ -452,13 +447,14 @@ class Iap2BluetoothClient(
                     // 探通=它就是车机（自动模式不再误杀，这是 2026-10-26 凯迪拉克日志的病根）；
                     // 探不通再看是不是「蓝牙已连接时不开放服务窗口」的机型（奥迪实测），
                     // 此时才断开配置文件重试一次——耳机类设备永远不会被我们断掉音频。
-                    var probe = tryConnect(device)
+                    var probe = tryConnect(device, myGeneration)
+                    if (generation.get() != myGeneration) return
                     if (probe == null && !looksLikePersonalAudio(device)) {
                         val dropped = BtProfiles.disconnect(context, device)
                         if (dropped.isNotEmpty()) {
                             log("BT-C: $name SDP 未给结论、直连失败——已断开 ${dropped.joinToString("/")} 再试一次")
                         }
-                        probe = tryConnect(device)
+                        probe = tryConnect(device, myGeneration)
                     }
                     if (probe == null) {
                         iap2ServiceCache[device.address] = false
@@ -480,7 +476,8 @@ class Iap2BluetoothClient(
                 // 压根查不到该服务。顺序反过来（先试、失败再断）对两种机型都成立：
                 // 需要「保持连接」的车机第一次就能成，奥迪那类需要「仅配对」的车机
                 // 会在第一次失败后走到下面的断开重试。
-                var socket = tryConnect(device)
+                var socket = tryConnect(device, myGeneration)
+                if (generation.get() != myGeneration) return
                 if (socket == null) {
                     // 「只配对、不连接」：奥迪 MIB3 实测手机与车机处于蓝牙已连接状态
                     // （HFP/A2DP 在线）时，车机不开放无线 CarPlay 的 iAP2 服务窗口——
@@ -498,7 +495,7 @@ class Iap2BluetoothClient(
                             )
                         }
                     }
-                    socket = tryConnect(device)
+                    socket = tryConnect(device, myGeneration)
                 }
                 if (socket != null) {
                     log("BT-C: ✓ 已连入 $name 的无线 iAP2 服务（RFCOMM 建立）")
@@ -571,11 +568,12 @@ class Iap2BluetoothClient(
             }
             if (generation.get() != myGeneration) {
                 // stop() 与 connect() 成功竞争：本线程已过期，不建会话
-                currentSocket.getAndSet(null)?.let { runCatching { it.close() } }
+                currentSocket.compareAndSet(connected, null)
+                runCatching { connected.close() }
                 return
             }
             val sessionStartedAt = android.os.SystemClock.uptimeMillis()
-            runSession(connected)
+            runSession(connected, myGeneration)
             // 「连上就被关」不算成功：2026-10-28 大众实测 52 轮全是「连入 → 0.5 秒被车机
             // 关闭」（车机不在无线窗口/要自己发起）。这类轮次按失败计，否则退避永远回到 3 秒，
             // 每轮白断一次车机、还可能抢掉它主动连入的时机。
@@ -676,7 +674,7 @@ class Iap2BluetoothClient(
     }
 
     @SuppressLint("MissingPermission")
-    private fun tryConnect(device: BluetoothDevice): BluetoothSocket? {
+    private fun tryConnect(device: BluetoothDevice, myGeneration: Long): BluetoothSocket? {
         val socket =
             try {
                 device.createRfcommSocketToServiceRecord(ACCESSORY_IAP2_UUID)
@@ -689,7 +687,13 @@ class Iap2BluetoothClient(
             }
         // 连接前就登记：connect() 是阻塞调用（SDP 查询 + 建链最长可达数十秒），
         // stop() 只有能拿到 socket 引用才能 close() 打断它，否则线程会滞留。
-        currentSocket.set(socket)
+        synchronized(this) {
+            if (!running || generation.get() != myGeneration) {
+                runCatching { socket.close() }
+                return null
+            }
+            currentSocket.set(socket)
+        }
         return try {
             socket.connect()
             lastConnectError = null
@@ -704,14 +708,20 @@ class Iap2BluetoothClient(
         }
     }
 
-    private fun runSession(socket: BluetoothSocket) {
+    private fun runSession(socket: BluetoothSocket, myGeneration: Long) {
         val stream =
             StreamDuplexStream(socket.inputStream, socket.outputStream) {
                 runCatching { socket.close() }
             }
         val channel = Iap2LinkChannel(stream, name = "iap2-bt-car") { line -> log(line) }
-        activeChannel = channel
-        manualTeardown = false
+        synchronized(this) {
+            if (generation.get() != myGeneration || currentSocket.get() !== socket) {
+                channel.close()
+                return
+            }
+            activeChannel = channel
+            manualTeardown = false
+        }
         val peerAddress =
             try {
                 socket.remoteDevice.address
@@ -723,28 +733,34 @@ class Iap2BluetoothClient(
                 context,
                 SESSION_TIMEOUT_MILLIS,
                 log,
-                onEndpoint,
-                onWifiCredentials,
-                onEndpointUpdate,
+                { if (activeChannel === channel) onEndpoint(it) },
+                { if (activeChannel === channel) onWifiCredentials(it) },
+                { if (activeChannel === channel) onEndpointUpdate(it) },
                 nowPlayingProvider,
-                onSessionReady = { session -> senderSession = session },
-                onLinkClosed = onLinkClosed,
+                onSessionReady = { session ->
+                    synchronized(this) {
+                        if (activeChannel === channel) senderSession = session
+                    }
+                },
+                onLinkClosed = { if (activeChannel === channel) onLinkClosed() },
                 remoteDevice = socket.remoteDevice,
             )
         } catch (error: IOException) {
             log("BT-C: SESSION 失败 - ${error.message}")
         } finally {
-            activeChannel = null
-            senderSession = null
-            currentSocket.getAndSet(null)?.let { runCatching { it.close() } }
-            runCatching { socket.close() }
+            synchronized(this) {
+                if (activeChannel === channel) {
+                    activeChannel = null
+                    senderSession = null
+                }
+                currentSocket.compareAndSet(socket, null)
+            }
             channel.close()
-            log("BT-C: 本轮会话结束（客户端仍在运行，将自动重连）")
             // CarPlay 还在跑、又不是我们主动拆的 → 这不是「本轮结束」，是控制链路掉线。
             // 主循环的静音闸门（sessionActive）会把重连一起挡掉，所以必须显式登记，
             // 让出站循环对**这一台**单独补连（2026-11-04 奥迪 MIB3 实车：
             // 三轮会话全在 `packet 115 not acknowledged` 后再也没人重连，车机控制数据全丢）。
-            if (running && !manualTeardown && BtSessionGate.sessionActive) {
+            if (running && generation.get() == myGeneration && !manualTeardown && BtSessionGate.sessionActive) {
                 BtSessionGate.noteLinkLost(peerAddress)
                 log(
                     "BT-C: CarPlay 会话仍在，但 iAP2 控制链路已断（${peerAddress ?: "地址未知"}）" +
@@ -755,12 +771,14 @@ class Iap2BluetoothClient(
     }
 
     /** 主动结束当前 BT 控制会话（不影响重连循环）。供 AirPlay 配对前复现控制通道退役状态。 */
+    @Synchronized
     fun detachCurrentSession() {
         // 主动拆的不要被当成「掉线」去补连（否则会立刻把刚退役的控制会话又建回来）
         manualTeardown = true
         // 断链**之前**先告诉车机「EA 会话结束」。车机侧没被显式停掉的 EAP/VIWI 会话
         // 会挡住下一次连接，而它自己的清理要等 mediaDisconnectTimeout(15s) 才成立。
         senderSession?.closeEaSessions("主动断开控制会话")
+        senderSession = null
         activeChannel?.let { channel ->
             activeChannel = null
             channel.close()
@@ -769,15 +787,13 @@ class Iap2BluetoothClient(
         currentSocket.getAndSet(null)?.let { runCatching { it.close() } }
     }
 
+    @Synchronized
     fun stop() {
         running = false
         // 递增世代：即便有线程卡在 connect()，事后也会因世代不符自杀，不会在下次启动时复活
         generation.incrementAndGet()
         BtSessionGate.clearLinkLost()
-        // 同 detachCurrentSession：先把 EA 会话收干净，再关 socket
-        senderSession?.closeEaSessions("停止控制链路")
-        currentSocket.getAndSet(null)?.let { runCatching { it.close() } }
-        activeChannel?.let { runCatching { it.close() } }
+        detachCurrentSession()
         thread?.interrupt()
         thread = null
         log("BT-C: 已停止")
@@ -876,25 +892,22 @@ object BtSessionGate {
      *
      * 所以：手动断开后要给车机留足 [REACTIVATE_COOLDOWN_MILLIS] 再发起。
      */
+    private data class ManualStop(val address: String?, val at: Long)
+
     @Volatile
-    var manualStopAt: Long = 0L
+    private var manualStop: ManualStop? = null
 
-    /**
-     * 手动断开后的重新发起冷却：**必须 > 车机的 mediaDisconnectTimeout（15s）**。
-     * 取 18 秒留 3 秒余量。改小就等于把车机的移除计时器一次次续上，永远停在旧会话上。
-     */
-    const val REACTIVATE_COOLDOWN_MILLIS = 18_000L
+    /** Audi's 15-second removal window plus a guard interval. */
+    private const val REACTIVATE_COOLDOWN_MILLIS = 18_000L
 
-    /** 记一次「用户手动断开」。 */
-    fun noteManualStop() {
-        manualStopAt = android.os.SystemClock.uptimeMillis()
+    fun noteManualStop(address: String?) {
+        manualStop = ManualStop(address, android.os.SystemClock.uptimeMillis())
     }
 
-    /** 距上次手动断开多少毫秒；本次进程没手动断过返回 [Long.MAX_VALUE]。 */
-    fun sinceManualStop(): Long {
-        val at = manualStopAt
-        if (at == 0L) return Long.MAX_VALUE
-        return android.os.SystemClock.uptimeMillis() - at
+    fun manualStopCooldownLeft(address: String?): Long {
+        val stop = manualStop ?: return 0L
+        if (stop.address != null && address != null && !stop.address.equals(address, ignoreCase = true)) return 0L
+        return (REACTIVATE_COOLDOWN_MILLIS - (android.os.SystemClock.uptimeMillis() - stop.at)).coerceAtLeast(0L)
     }
 
     /** 记一次「控制链路掉线」，交给出站循环单独重连。 */

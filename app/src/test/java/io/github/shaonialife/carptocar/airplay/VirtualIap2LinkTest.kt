@@ -230,9 +230,9 @@ class VirtualIap2LinkTest {
                 .let { Iap2Csm.parseParams(it).first() }
         assertEquals(20, challengeBody.value.size)
 
-        // 0xAA03（签名应答）→ 0xAA05 + 突发（0x4E0C/0xA100/0x4E0A/0x4E0B/0x4E09/0xFFFA/0xFFF0）
+        // 0xAA03（签名应答）→ 0xAA05 + 突发（0x4E0C/0xA100/0x4E0A/0x4E0B/0x4E09）
         assertEquals(
-            listOf(0xAA05, 0x4E0C, 0xA100, 0x4E0A, 0x4E0B, 0x4E09, 0xFFFA, 0xFFF0),
+            listOf(0xAA05, 0x4E0C, 0xA100, 0x4E0A, 0x4E0B, 0x4E09),
             h.carSends(0xAA03, Iap2Csm.param(0, ByteArray(96))),
         )
 
@@ -392,7 +392,7 @@ class VirtualIap2LinkTest {
                 .controlFrames()
                 .drop(after)
                 .map { it.second }
-                .containsAll(listOf(0xAA05, 0x4E0C, 0xFFFA)),
+                .containsAll(listOf(0xAA05, 0x4E0C, 0x4E09)),
         )
     }
 
