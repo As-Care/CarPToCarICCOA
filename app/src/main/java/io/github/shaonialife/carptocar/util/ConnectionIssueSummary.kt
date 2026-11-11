@@ -10,7 +10,14 @@ internal object ConnectionIssueSummary {
         """(?i)(?:\b(?:psk|password|passphrase|pin|token|sharedSecret)\s*[=:：]|热点密码\s*[:：]?)\s*.*|配对码\s*[:：]?\s*\d+""",
     )
 
-    fun format(appName: String, version: String, target: String, currentStage: String, logs: String): String {
+    fun format(
+        appName: String,
+        version: String,
+        target: String,
+        currentStage: String,
+        logs: String,
+        incident: String? = null,
+    ): String {
         val recent = logs.lineSequence().filter { LogDisplayLevel.of(it).isIssue }.toList().takeLast(4)
         val lastFailure = failedStage.findAll(logs).lastOrNull()?.groupValues?.get(1)
         return buildString {
@@ -18,6 +25,10 @@ internal object ConnectionIssueSummary {
             appendLine("目标车机 · ${sanitize(target).take(60)}")
             appendLine("当前状态 · ${sanitize(currentStage).take(140)}")
             if (lastFailure != null) appendLine("最近失败阶段 · ${sanitize(lastFailure).take(140)}")
+            if (!incident.isNullOrBlank()) {
+                appendLine("上次意外断链时间线")
+                appendLine(incident)
+            }
             if (recent.isEmpty()) {
                 append("暂无异常记录")
             } else {
@@ -30,7 +41,7 @@ internal object ConnectionIssueSummary {
         }
     }
 
-    private fun sanitize(text: String): String {
+    fun sanitize(text: String): String {
         val withoutCredentials = credentials.replace(text.lineSequence().first(), "〈已隐藏〉")
         val withoutMac = mac.replace(withoutCredentials, "〈蓝牙地址〉")
         return ipv6.replace(ipv4.replace(withoutMac, "〈IP〉"), "〈IP〉")

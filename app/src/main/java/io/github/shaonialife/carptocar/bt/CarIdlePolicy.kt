@@ -12,18 +12,16 @@ package io.github.shaonialife.carptocar.bt
  *
  * ## 为什么判「在推流」而不是「会话在跑」
  *
- * `isSessionRunning()` 在「点过启动连接、蓝牙服务正监听等车机回连」时也一直是 true，
- * 可以持续好几分钟。拿它当阻断条件，收摊就永远不会触发（功能看起来完全没生效）。
- * 真正需要保护的是**画面正在车机上跑**：CarPlay 的镜像走 WiFi，蓝牙 ACL 只是
- * 控制/配对通道，蓝牙模块重启时画面可能还在——这种情况绝不能把进程掐掉。
+ * 蓝牙与 Wi-Fi 视频可独立存活，计时到期后仍有画面时继续投屏。
+ * 手机界面是否可见只决定是否退出进程。
  */
 object CarIdlePolicy {
     /** 蓝牙断开后等这么久再收摊。 */
     const val IDLE_TIMEOUT_MILLIS = 30_000L
 
     enum class Verdict {
-        /** 该关了：没链路、没画面、用户也没在看界面。 */
-        CLOSE,
+        STOP_SESSION,
+        STOP_PROCESS,
 
         /** 车机又连上了（30 秒内回连）——保留会话。 */
         STILL_CONNECTED,
@@ -31,8 +29,7 @@ object CarIdlePolicy {
         /** 蓝牙断了但画面还在送（镜像走 WiFi）——不杀，用户正在用。 */
         STREAMING,
 
-        /** 用户正开着界面在看（前台可见）——停在会话这一层，不关进程。 */
-        UI_VISIBLE,
+        WAITING,
     }
 
     /**
@@ -42,13 +39,15 @@ object CarIdlePolicy {
      */
     fun onIdleTimeout(
         aclConnected: Boolean,
+        disconnectedForMillis: Long,
         streaming: Boolean,
         uiVisible: Boolean,
     ): Verdict =
         when {
             aclConnected -> Verdict.STILL_CONNECTED
+            disconnectedForMillis < IDLE_TIMEOUT_MILLIS -> Verdict.WAITING
             streaming -> Verdict.STREAMING
-            uiVisible -> Verdict.UI_VISIBLE
-            else -> Verdict.CLOSE
+            uiVisible -> Verdict.STOP_SESSION
+            else -> Verdict.STOP_PROCESS
         }
 }

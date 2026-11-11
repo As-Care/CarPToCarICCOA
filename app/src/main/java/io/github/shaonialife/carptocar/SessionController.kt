@@ -19,6 +19,7 @@ import io.github.shaonialife.carptocar.bt.BtProfiles
 import io.github.shaonialife.carptocar.bt.BtSessionGate
 import io.github.shaonialife.carptocar.bt.Iap2BluetoothClient
 import io.github.shaonialife.carptocar.bt.Iap2BluetoothServer
+import io.github.shaonialife.carptocar.bt.CarApproachPrefs
 import io.github.shaonialife.carptocar.bt.CarIdleGuard
 import io.github.shaonialife.carptocar.bt.TargetDevicePrefs
 import io.github.shaonialife.carptocar.capture.HiddenDisplaySource
@@ -57,6 +58,7 @@ import io.github.shaonialife.carptocar.ui.ScreenDimmer
 import io.github.shaonialife.carptocar.util.Bg
 import io.github.shaonialife.carptocar.util.ConnectBudget
 import io.github.shaonialife.carptocar.util.ConnectStage
+import io.github.shaonialife.carptocar.util.ConnectionIncidentTimeline
 import io.github.shaonialife.carptocar.util.DebugFileLog
 import io.github.shaonialife.carptocar.util.SessionTrace
 import io.github.shaonialife.carptocar.util.SysShell
@@ -308,6 +310,7 @@ object SessionController {
                 }
                 if (NotificationAccess.isConnected) continue
                 val context = appContext ?: continue
+                if (isCarOffline) continue
                 attempts++
                 NotificationAccess.requestSystemRebind(context, ::appendLog)
                 // requestRebind 在部分 ROM（荣耀 MagicOS 实测）不生效：系统只认
@@ -435,6 +438,8 @@ object SessionController {
         )
     }
 
+    private val connectionIncident = ConnectionIncidentTimeline()
+
     /** 追加一行日志：logcat + 文件 + 进程级缓冲 + 挂屏渲染（增量行直送）。任意线程可调。 */
     fun appendLog(message: String) {
         // NUL 会写进日志文件：文本编辑器/文件管理器打不开（Read 工具也会判为二进制），
@@ -446,6 +451,10 @@ object SessionController {
         appContext?.let {
             DebugFileLog
                 .append(it, clean)
+            if (BuildConfig.CAR_PLUS) synchronized(connectionIncident) {
+                connectionIncident.record(clean, android.os.SystemClock.uptimeMillis(), System.currentTimeMillis())
+                    ?.let { timeline -> ConnectionIncidentTimeline.save(it, timeline) }
+            }
         }
         if (!logEnabled) return
         val line =
@@ -604,12 +613,9 @@ object SessionController {
     @Volatile
     var activeScalePercent: Int = 100
 
-    /**
-     * 本会话目标帧率：车机 `/info displays[0].maxFPS` 有值就跟随，没声明按 60
-     * （判定见 [StreamFps]）。会话建立前是 60，SETUP 之后才是最终值。
-     */
+    /** 本会话目标帧率，ICCOA 在 SETUP 后按该车偏好和本轮通告确定。 */
     @Volatile
-    var activeTargetFps: Int = StreamFps.DEFAULT_FPS
+    var activeTargetFps: Int = if (BuildConfig.CAR_PLUS) CarPlusVideo.FPS else StreamFps.DEFAULT_FPS
 
     // ---- 本会话分辨率（英雄卡 / 显示卡片展示，均为会话建立时的快照）----
 
@@ -1054,6 +1060,7 @@ object SessionController {
             server.stopProbe()
             return
         }
+        if (isCarOffline) return
         if (fromUser) compatSuppressed = false
         if (compatSuppressed) return
         if (!server.hasPermission()) {
@@ -1061,7 +1068,7 @@ object SessionController {
             return
         }
         Bg.run("bt-compat-listen") {
-            if (compatSuppressed || pendingBluetoothStart != null) return@run
+            if (compatSuppressed || isCarOffline || pendingBluetoothStart != null) return@run
             if (isSessionRunning() || sessionStarting.get()) {
                 // 正在连/已在跑：start() 幂等，顺带把占位记录同步到当前开关状态
                 server.start()
@@ -1088,7 +1095,7 @@ object SessionController {
                     return@Thread
                 }
                 val ctx = appContext ?: continue
-                if (!BtCompatPrefs.enabled(ctx) || compatSuppressed || pendingBluetoothStart != null) continue
+                if (!BtCompatPrefs.enabled(ctx) || compatSuppressed || isCarOffline || pendingBluetoothStart != null) continue
                 // 连接流程/推流中由它们自己维护监听，这里不插手
                 if (sessionStarting.get() || isStreaming()) continue
                 val server = bluetoothServer ?: continue
@@ -1516,20 +1523,22 @@ object SessionController {
      *
      * 与 [isSessionRunning] 的区别很关键：后者在「点过启动连接、蓝牙服务正监听等
      * 车机回连」时也是 true，可能持续几分钟；而这里只认「画面真的在送」。
-     * 车机远离后的收摊判定用这个——否则永远判为「会话还在跑」，收摊永不生效。
      */
-    fun isStreaming(): Boolean = videoSender?.isRunning == true
+    fun isStreaming(): Boolean = videoSender?.isRunning == true && currentClient?.isRetired != true
 
-    @Volatile
-    private var endedVideoPeerAddress: String? = null
+    val isCarOffline: Boolean get() = appContext?.let(CarApproachPrefs::offlineCarAddress) != null
+
+    // 静止画面可以没有新帧，Car+ 源还在且已发过首帧就仍在投屏。
+    fun isCarProjectionActive(sender: VideoSender? = videoSender): Boolean =
+        sender?.isRunning == true && currentClient?.isRetired != true &&
+            (!BuildConfig.CAR_PLUS || CarPlusReceiver.isSourceConnected && sender.framesSentTotal > 0)
 
     fun carPlayPeerAddress(): String? =
         if (sessionWanted) lastGoodEndpoint?.bluetoothPeer?.address ?: lastCarWifi?.bluetoothPeer?.address else null
 
-    fun hasEndedCarVideo(address: String): Boolean =
-        sessionWanted && address.equals(endedVideoPeerAddress, ignoreCase = true)
-
-    fun hasCarWorkToStop(): Boolean = sessionWanted || isSessionRunning() || idleListening
+    fun hasCarWorkToStop(): Boolean =
+        sessionWanted || sessionStarting.get() || isSessionRunning() || idleListening ||
+            (BuildConfig.CAR_PLUS && CarPlusReceiver.isRunning)
 
     /**
      * 通知栏的一句话状态（[io.github.shaonialife.carptocar.service.CarPlayService] 每 3 秒取一次）。
@@ -1562,8 +1571,8 @@ object SessionController {
             return
         }
         CarIdleGuard.cancel(context)
+        if (isCarOffline) CarApproachPrefs.setOfflineCarAddress(context, null)
         connectCancelled = false
-        endedVideoPeerAddress = null
         lastGoodEndpoint = null
         // 新一轮 = 新的一致性审计：清空上一轮的问题清单，并把输出口接到本控制器的
         // appendLog（logcat + 文件 + 界面三路都走它，用户导出日志即带走整份清单）。
@@ -1741,6 +1750,8 @@ object SessionController {
 
     /** 会话结束/新周期开始前彻底退役上一代会话（旧管线泄漏会累积编码器/虚拟显示器，最终 dequeueBuffer -19）。 */
     fun retireSession() {
+        val hadVideo = videoSender?.isRunning == true
+        currentClient?.retire()
         // 只断车机视频通道，不拆 CarLife 劫持本身：本方法在每轮配对起步也会执行，
         // 而 CarLife 连接与 GOP 缓存要跨会话保留（用户可以在会话中途才进「无线连接」）。
         CarLifeHijack.detach()
@@ -1771,8 +1782,6 @@ object SessionController {
         currentHiddenSource = null
         TouchRouter
             .reset()
-        currentClient?.cancelled = true
-        currentClient?.close()
         currentClient = null
         // 注意：这里绝不能 detach BT 控制会话。本方法在每轮配对起步时也会执行，
         // 而 DiPlay 在 WiFi 隧道就绪前看到 RFCOMM 断开即判 bring-up failed、
@@ -1789,6 +1798,7 @@ object SessionController {
         // 协议一致性汇总：放在最后一行，拆链原因与问题清单一前一后，反馈日志时最上面、
         // 最下面各有一条结论，不用翻中间过程。
         flushProtocolAudit("会话退役")
+        if (hadVideo) appContext?.let(CarIdleGuard::onProjectionStopped)
     }
 
     /** 会话已建立且投影就绪、但音频尚未启动时，动态补启（投影授权晚于连接的场景）。 */
@@ -2927,12 +2937,24 @@ object SessionController {
         sender: AudioSender,
         hasRecentMusicPcm: Boolean,
     ) {
-        if (currentClient !== client || audioSender !== sender || videoSender?.isRunning != true) return
+        if (currentClient !== client || audioSender !== sender || videoSender?.isRunning != true || !sender.isRunning) return
         val manager = appContext?.getSystemService(android.media.AudioManager::class.java) ?: return
         if (audioInCallMode || isCallMode(manager.mode)) return
+        if (client.carOwnsMainAudio) {
+            appendLog("AUDIO: 相机退出时车机仍持有主音频，等车机归还")
+            return
+        }
         val source = if (hasRecentMusicPcm) "仍有音乐 PCM" else "最近 2 秒未收到非静音音乐 PCM"
         appendLog("AUDIO: 相机释放后检查音频，Car+ $source")
-        if (!rebuildAudioChannel("相机退出") && currentClient === client && audioSender === sender) {
+        // 奥迪 DELPHI MIB3 实测：已有主音频流时再次 SETUP，回 400 后会拆整个 CarPlay 会话。
+        if (client.receiverIdentity().startsWith("DELPHI AUDI ", ignoreCase = true)) {
+            appendLog("AUDIO: 相机退出 → 沿用奥迪现有媒体音频流")
+            sender.resyncAnchor("相机退出")
+            return
+        }
+        if (!rebuildAudioChannel("相机退出") &&
+            currentClient === client && audioSender === sender && !client.carOwnsMainAudio
+        ) {
             client.refreshVolume("相机退出")
             sender.resyncAnchor("相机退出")
         }
@@ -3861,7 +3883,7 @@ object SessionController {
         // RFCOMM 重连并重发 0x4301。此时重启配对会 retireSession 掉健康会话
         // （编码器 stop 竞态 = 「连上后自动断开」循环的根因）。推流中的端点一律忽略；
         // 真断连时推流自行终止（isRunning=false），下一个端点自然接续重连。
-        if (videoSender?.isRunning == true) {
+        if (isStreaming()) {
             appendLog(">>> [$source] 会话推流中——忽略冗余端点（接收端周期重连的重复 0x4301）")
             return
         }
@@ -3971,6 +3993,7 @@ object SessionController {
         // 只会拿到旧网络的结果（此前靠 resolveEndpointHost 内部重试掩盖，白等数秒）。
         // 绑定完成后再并行做三件事：ctrl 广播针对新网络重注册、后台发现 _airplay._tcp、
         // 等车机 ctrl 邀请（车机已发现我们的权威信号）。
+        val alreadyBound = boundCarSsid == endpoint.ssid && wifiConnector?.currentNetwork != null
         val continueWithNetwork: (Boolean) -> Unit = proceed@{ bound ->
             if (!bound) {
                 phaseHint = "手机不在车机热点——请到 WLAN 设置加入 ${endpoint.ssid}"
@@ -3985,8 +4008,11 @@ object SessionController {
             }
             // 网络绑定完成：ctrl 广播重新注册（落到车机所在网络），同时开始后台 mDNS 发现。
             // 两者都发生在等邀请期间，不额外占用时间。
-            ctrlAdvertiser?.ensureForNetwork(endpoint.ssid, force = true, network = wifiConnector?.currentNetwork)
-            endpointBrowser?.resetCache()
+            val reuseAdvertisement = alreadyBound && source == "车机 ctrl 邀请触发"
+            ctrlAdvertiser?.ensureForNetwork(
+                endpoint.ssid, force = !reuseAdvertisement, network = wifiConnector?.currentNetwork,
+            )
+            if (!reuseAdvertisement) endpointBrowser?.resetCache()
             endpointBrowser?.start()
             // 0x4301 自带完整地址+端口 = 接收端已明确告知「连这里」，无需等邀请
             // （DiPlay 测试台路径：本轮直接配对，省掉固定等待）。
@@ -4513,7 +4539,7 @@ object SessionController {
 
                                     "changeModes" -> {
                                         if (BuildConfig.CAR_PLUS && currentClient === client) {
-                                            val carOwnsAudio = client.updateMainAudioMode(command["params"] as? Map<*, *>)
+                                            val carOwnsAudio = client.updateResourceModes(command["params"] as? Map<*, *>)
                                             if (carOwnsAudio != null && videoSender?.isRunning == true) {
                                                 val controller = MediaSessionsState.activeController
                                                 if (carOwnsAudio) {
@@ -4664,10 +4690,15 @@ object SessionController {
                                         manualCarPlusSize?.width ?: ((setup.displayWidth * scale).toInt().coerceAtLeast(320) / 2) * 2
                                     val streamH =
                                         manualCarPlusSize?.height ?: ((setup.displayHeight * scale).toInt().coerceAtLeast(180) / 2) * 2
-                                    // 目标帧率：车机 `/info displays[0].maxFPS` 说了算，
-                                    // 车机没声明按 60（判定见 video/StreamFps.kt）。
-                                    val sessionTargetFps =
-                                        if (BuildConfig.CAR_PLUS) CarPlusVideo.FPS else StreamFps.resolve(setup.maxFps)
+                                    val carMaxFps = setup.maxFps
+                                    val sessionTargetFps = if (BuildConfig.CAR_PLUS) {
+                                        carPlusPeer?.let { DisplayPrefs.recordCarPlusCarMaxFps(context, it.address, carMaxFps) }
+                                        CarPlusVideo.targetFps(
+                                            DisplayPrefs.carPlusHighFps(context, carPlusPeer?.address), carMaxFps,
+                                        )
+                                    } else {
+                                        StreamFps.resolve(carMaxFps)
+                                    }
                                     activeScalePercent = scalePct
                                     activeTargetFps = sessionTargetFps
                                     // 合成器出帧节奏跟着走：attach 时按 60 建（那时还没
@@ -4701,7 +4732,7 @@ object SessionController {
                                             CarPlusVideo.displaySize(setup.displayWidth, setup.displayHeight)
                                         } else null
                                         val canvas = manualCarPlusSize ?: reported ?: CarPlusVideo.defaultSize
-                                        CarPlusReceiver.setCanvas(canvas.width, canvas.height)
+                                        CarPlusReceiver.setVideoConfig(canvas.width, canvas.height, sessionTargetFps)
                                         if (manualCarPlusSize != null) {
                                             appendLog("ICCOA: 使用手动流分辨率 ${canvas.width}×${canvas.height}")
                                         }
@@ -4740,6 +4771,9 @@ object SessionController {
                                     // 英雄卡与「显示」卡片显示的就是它，不是申请值。
                                     activeStreamWidth = streamOutW
                                     activeStreamHeight = streamOutH
+                                    val frameRateNote = if (BuildConfig.CAR_PLUS) {
+                                        if (carMaxFps > 0) "车机通告 maxFPS=$carMaxFps" else "车机未通告 maxFPS"
+                                    } else StreamFps.describe(carMaxFps)
                                     appendLog(
                                         "DISPLAY: 车机 ${setup.displayWidth}×${setup.displayHeight}" +
                                             (if (setup.displayFromCar) {
@@ -4748,7 +4782,7 @@ object SessionController {
                                                 "（车机未通告·手机横屏兜底）"
                                             }) +
                                             " → 流 ${streamOutW}×${streamOutH}（$scalePct%）" +
-                                            "@${sessionTargetFps}fps（${StreamFps.describe(setup.maxFps)}）",
+                                            "@${sessionTargetFps}fps（$frameRateNote）",
                                     )
                                     if (!BuildConfig.CAR_PLUS && (streamOutW != streamW || streamOutH != streamH)) {
                                         appendLog(
@@ -4781,7 +4815,6 @@ object SessionController {
                                         } else {
                                             manualCarPlusSize?.let { it.width to it.height }
                                         }
-                                    endedVideoPeerAddress = null
                                     videoSender =
                                         VideoSender(
                                             host = host,
@@ -4825,7 +4858,16 @@ object SessionController {
                                                     null
                                                 },
                                             onSurfaceStopped = if (BuildConfig.CAR_PLUS) CarPlusReceiver::detach else null,
-                                            onEnded = {
+                                            onEnded = ended@{
+                                                val endedSender = videoSender
+                                                if (currentClient !== client) return@ended
+                                                if (BuildConfig.CAR_PLUS && sessionWanted &&
+                                                    !connectCancelled && !disconnecting && client.retire()
+                                                ) {
+                                                    appendLog("${ConnectionIncidentTimeline.TRANSPORT_LOSS} · 视频通道结束")
+                                                }
+                                                if (BuildConfig.CAR_PLUS) CarPlusReceiver.stopVideo(endedSender)
+                                                if (currentClient !== client) return@ended
                                                 // 会话真实结束：解除静默降噪（客户端恢复探测/重连）
                                                 appendLog(">>> CarPlay 会话结束（推流终止）——恢复蓝牙探测")
                                                 BtSessionGate.sessionActive = false
@@ -4843,14 +4885,19 @@ object SessionController {
                                                 // 不兼容，下次连接自动换档（见 attributeAudioTeardown）。
                                                 if (sessionWanted && currentClient === client) {
                                                     attributeAudioTeardown()
-                                                    val address = effectiveEndpoint.bluetoothPeer?.address
-                                                        ?: endpoint.bluetoothPeer?.address
-                                                        ?: TargetDevicePrefs.get(context)?.address
-                                                    endedVideoPeerAddress = address
-                                                    CarIdleGuard.onCarVideoEnded(context, address)
+                                                    CarIdleGuard.onProjectionStopped(context)
                                                 }
                                             },
                                         )
+                                    if (BuildConfig.CAR_PLUS) {
+                                        val sender = videoSender
+                                        client.onControlLost = {
+                                            if (currentClient === client && sessionWanted && !connectCancelled && !disconnecting) {
+                                                appendLog("${ConnectionIncidentTimeline.TRANSPORT_LOSS} · 控制通道结束")
+                                                Bg.run("airplay-control-lost") { sender?.endStream() }
+                                            }
+                                        }
+                                    }
                                     // 先连端口（车机看门狗），编码器等 RECORD 后再启动
                                     videoSender?.openDataPort()
                                 }
@@ -4885,15 +4932,19 @@ object SessionController {
                                         )
                                     }
                                 }
+                                if (client.isRetired) return@run
                                 // RECORD 成功 = 会话活着。此刻丢弃报文缓冲：用户要的是
                                 // 「连不上」的现场，正常连接不需要快照（省空间也省导出体积）。
                                 SessionTrace.markLinked()
                                 if (BuildConfig.CAR_PLUS) {
                                     activeCarPlusPeer = carPlusPeer
                                     val started = videoSender?.let {
-                                        CarPlusReceiver.startVideo(
+                                        val running = CarPlusReceiver.startVideo(
                                             it, client.receiverIdentity(), activeStreamWidth, activeStreamHeight,
+                                            receiverAddress = carPlusPeer?.address,
                                         )
+                                        if (client.isRetired) it.endStream()
+                                        running && !client.isRetired
                                     } == true
                                     if (started && setup.displayFromCar && carPlusPeer != null) {
                                         CarPlusResolutionHistory.record(context, carPlusPeer, setup.displayWidth, setup.displayHeight)
@@ -4963,7 +5014,7 @@ object SessionController {
                                 // 连续静默，控制会话晚 6 秒才起来，6011 同步包还被 ICMP 拒。
                                 // 同源项目在 CL39 上就是「控制会话就绪——允许音频 SETUP」之后
                                 // 才发，往返只有 172ms。等不到也不拆链：照常发，超时兜底。
-                                val wantAudio = !BuildConfig.CAR_PLUS || BuildConfig.CAR_PLUS_AUDIO_RELAY
+                                val wantAudio = !client.isRetired && (!BuildConfig.CAR_PLUS || BuildConfig.CAR_PLUS_AUDIO_RELAY)
                                 if (wantAudio && sessionKey != null) {
                                     val ready = client.awaitControlSession(AUDIO_CONTROL_SESSION_WAIT_MS)
                                     appendLog(
@@ -5065,7 +5116,7 @@ object SessionController {
                 endpoint.channel,
                 endpoint.securityType,
             )
-        if (boundCarSsid == endpoint.ssid && wifiConnector?.currentNetwork != null) {
+        if (alreadyBound) {
             appendLog(">>> [$source] 已绑定车机热点 ${endpoint.ssid}，跳过重复绑定")
             continueWithNetwork(true)
         } else {

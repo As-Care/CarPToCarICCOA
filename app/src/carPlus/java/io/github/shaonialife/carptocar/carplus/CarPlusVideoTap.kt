@@ -10,14 +10,18 @@ import java.io.DataOutputStream
 import java.io.IOException
 import java.nio.ByteBuffer
 import java.util.concurrent.ArrayBlockingQueue
+import java.util.concurrent.atomic.AtomicReference
 
 /** Entry points called by the SDK bundled in our APK, before it queues a frame for decoding. */
 @Keep
 internal object CarPlusVideoTap {
     const val MAX_FRAME_BYTES = 2 * 1024 * 1024
     @Volatile private var target: Target? = null
-    @Volatile var requestedCanvas: CarPlusVideo.Size? = null
+    @Volatile var request = CarPlusVideo.Request()
+    @Volatile var advertisedFps: Int? = null
+        private set
     @Volatile var onSourceSize: ((CarPlusVideo.Size) -> Unit)? = null
+    private val nextFrame = AtomicReference<(() -> Unit)?>(null)
     private val originalStart by lazy {
         Class.forName("com.ucar.vehiclesdk.cast.CastManager").getMethod(
             "startCast", Surface::class.java, Integer.TYPE, Integer.TYPE, java.lang.Boolean.TYPE,
@@ -51,23 +55,36 @@ internal object CarPlusVideoTap {
     }
 
     @JvmStatic
+    @Suppress("UNUSED_PARAMETER") // The hook keeps the SDK method signature.
     fun startWfdServer(
         manager: Any, width: Int, height: Int, dpi: Int, fps: Int,
         hevc: Boolean, fusion: Boolean, rawPackets: Boolean,
     ) {
-        val canvas = requestedCanvas ?: CarPlusVideo.Size(width, height)
-        Log.i("CarPlusVideo", "ICCOA 向 Car+ 申请原生画布 ${canvas.width}×${canvas.height}@$fps")
-        originalWfdStart.invoke(manager, canvas.width, canvas.height, dpi, fps, hevc, fusion, rawPackets)
+        val requested = request
+        val canvas = requested.canvas ?: CarPlusVideo.Size(width, height)
+        val sourceFps = requested.fps
+        advertisedFps = sourceFps
+        Log.i("CarPlusVideo", "ICCOA 向 Car+ 申请原生画布 ${canvas.width}×${canvas.height}@$sourceFps")
+        originalWfdStart.invoke(manager, canvas.width, canvas.height, dpi, sourceFps, hevc, fusion, rawPackets)
+    }
+
+    fun resetAdvertisedFps() {
+        advertisedFps = null
+    }
+
+    fun onNextFrame(callback: (() -> Unit)?) {
+        nextFrame.set(callback)
     }
 
     @JvmStatic
     fun queueFrame(queue: Any, buffer: ByteBuffer, timestampUs: Long) {
+        val size = buffer.remaining()
+        if (size > 0 && nextFrame.get() != null) nextFrame.getAndSet(null)?.invoke()
         val pipe = target
         if (pipe == null) {
             originalQueue.invoke(queue, buffer, timestampUs)
             return
         }
-        val size = buffer.remaining()
         if (size == 0) return
         if (size in 1..MAX_FRAME_BYTES) {
             val bytes = ByteArray(size)

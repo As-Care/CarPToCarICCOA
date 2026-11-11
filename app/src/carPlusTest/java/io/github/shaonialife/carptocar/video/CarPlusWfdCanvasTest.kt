@@ -16,15 +16,19 @@ import org.junit.runner.RunWith
 @RunWith(AndroidJUnit4::class)
 class CarPlusWfdCanvasTest {
     @Test
-    fun sdkAdvertisesAudiCanvasToWfdSource() = checkAdvertisedCanvas(CarPlusVideo.Size(1412, 654))
+    fun sdkAdvertisesAudiCanvasToWfdSource() = checkAdvertisedVideo(CarPlusVideo.Size(1412, 654), CarPlusVideo.FPS)
 
     @Test
     fun sdkAdvertisesManualCanvasToWfdSource() {
         val size = checkNotNull(CarPlusVideo.manualSize(1380, 880))
-        checkAdvertisedCanvas(size)
+        checkAdvertisedVideo(size, CarPlusVideo.FPS)
     }
 
-    private fun checkAdvertisedCanvas(size: CarPlusVideo.Size) {
+    @Test
+    fun sdkAdvertisesSelectedHighFrameRateToWfdSource() =
+        checkAdvertisedVideo(CarPlusVideo.Size(1280, 720), CarPlusVideo.HIGH_FPS)
+
+    private fun checkAdvertisedVideo(size: CarPlusVideo.Size, fps: Int) {
         assumeTrue(BuildConfig.CAR_PLUS_VIDEO_RELAY)
         ServerSocket(0, 1, InetAddress.getByName("127.0.0.1")).use { source ->
             source.soTimeout = 5_000
@@ -37,7 +41,7 @@ class CarPlusWfdCanvasTest {
                 deviceType,
                 Class.forName("com.ucar.vehiclesdk.cast.CastListener"),
             ).newInstance(null, device, null)
-            CarPlusVideoTap.requestedCanvas = size
+            CarPlusVideoTap.request = CarPlusVideo.Request(size, fps)
             try {
                 CarPlusVideoTap.startWfdServer(cast, 1280, 720, 320, 30, false, false, false)
                 source.accept().use { peer ->
@@ -64,9 +68,11 @@ class CarPlusWfdCanvasTest {
                     val (headers, body) = readRtsp(input)
                     assertTrue(headers.first(), headers.first().startsWith("RTSP/1.0 200"))
                     assertTrue(body, body.contains("display=${size.width}:${size.height}"))
+                    assertTrue(body, body.contains(";fps=$fps"))
                 }
             } finally {
-                CarPlusVideoTap.requestedCanvas = null
+                CarPlusVideoTap.request = CarPlusVideo.Request()
+                CarPlusVideoTap.resetAdvertisedFps()
             }
         }
     }

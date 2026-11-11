@@ -19,4 +19,13 @@
     <string name="local_video_source_idle">CarLife+ 未启动</string>
     <string name="app_subtitle">非官方实验性 CarPlay 兼容发送端</string>
     <string name="accessibility_description">镜像模式：把车机触摸手势注入手机屏幕，不读取屏幕内容</string>
+    <string name="carplus_frame_rate">投屏帧率</string>
+    <string name="carplus_frame_rate_30">30 fps · 稳定</string>
+    <string name="carplus_frame_rate_60">60 fps · 高帧率</string>
+    <string name="carplus_frame_rate_select_device">选择蓝牙设备并连接后读取车机帧率上限</string>
+    <string name="carplus_frame_rate_unknown">%1$s · 车机尚未确认支持 60 fps</string>
+    <string name="carplus_frame_rate_limited">%1$s · 车机上限 %2$d fps</string>
+    <string name="carplus_frame_rate_next_connection">%1$s · 下次连接生效</string>
+    <string name="carplus_frame_rate_saved">%1$s 已保存 · 下次连接生效</string>
+    <string name="carplus_frame_rate_current">当前目标 %1$d fps · 实际发送 %2$s fps</string>
 </resources>

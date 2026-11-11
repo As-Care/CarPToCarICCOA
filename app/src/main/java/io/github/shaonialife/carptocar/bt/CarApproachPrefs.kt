@@ -25,6 +25,7 @@ object CarApproachPrefs {
     private const val KEY_BATTERY_PROMPT_AT = "car_approach_battery_prompt_at"
     private const val KEY_OVERLAY_PROMPT_AT = "car_approach_overlay_prompt_at"
     private const val KEY_ACL_CONNECTED = "car_approach_acl_connected"
+    private const val KEY_OFFLINE_CAR = "car_approach_offline_car"
 
     /**
      * 「请把本应用加入电池优化白名单」的提醒间隔：7 天。
@@ -113,6 +114,17 @@ object CarApproachPrefs {
             .getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
             .edit()
             .putBoolean(KEY_ACL_CONNECTED, connected)
+            .apply()
+    }
+
+    /** 离车后即使锁屏退出进程，恢复界面也继续等待车机回连。 */
+    fun offlineCarAddress(context: Context): String? =
+        context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE).getString(KEY_OFFLINE_CAR, null)
+
+    fun setOfflineCarAddress(context: Context, address: String?) {
+        context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            .edit()
+            .putString(KEY_OFFLINE_CAR, address)
             .apply()
     }
 

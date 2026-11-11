@@ -43,6 +43,8 @@ class CarPlayServiceBrowser(
      */
     @Volatile
     private var resolved: NsdServiceInfo? = null
+    private val discoveryLock = Any()
+    private val pendingResolutions = mutableMapOf<String, Any>()
 
     /** 新会话开始时清掉上一轮缓存（车机可能换了地址/端口）。 */
     fun resetCache() {
@@ -96,6 +98,10 @@ class CarPlayServiceBrowser(
         if (!discovering) return
         runCatching { nsdManager.stopServiceDiscovery(discoveryListener) }
         discovering = false
+        synchronized(discoveryLock) {
+            pendingResolutions.clear()
+            resolved = null
+        }
         log("$TAG: 停止发现")
     }
 
@@ -122,18 +128,27 @@ class CarPlayServiceBrowser(
 
             override fun onServiceFound(serviceInfo: NsdServiceInfo) {
                 log("$TAG: 发现服务 ${serviceInfo.serviceName} (${serviceInfo.serviceType})，解析中…")
-                resolveWithRetry(serviceInfo, attempts = 3)
+                val token = Any()
+                synchronized(discoveryLock) { pendingResolutions[serviceInfo.serviceName] = token }
+                resolveWithRetry(serviceInfo, token, attempts = 3)
             }
 
             override fun onServiceLost(serviceInfo: NsdServiceInfo) {
+                synchronized(discoveryLock) {
+                    pendingResolutions.remove(serviceInfo.serviceName)
+                    if (resolved?.serviceName == serviceInfo.serviceName) resolved = null
+                }
                 log("$TAG: 服务消失 ${serviceInfo.serviceName}")
             }
         }
 
     private fun resolveWithRetry(
         serviceInfo: NsdServiceInfo,
+        token: Any,
         attempts: Int,
     ) {
+        val name = serviceInfo.serviceName
+        if (synchronized(discoveryLock) { pendingResolutions[name] !== token }) return
         val listener =
             object : NsdManager.ResolveListener {
                 override fun onResolveFailed(
@@ -143,9 +158,12 @@ class CarPlayServiceBrowser(
                     if (errorCode == NsdManager.FAILURE_ALREADY_ACTIVE && attempts > 1) {
                         Thread {
                             Thread.sleep(200)
-                            resolveWithRetry(info, attempts - 1)
+                            resolveWithRetry(info, token, attempts - 1)
                         }.start()
                     } else {
+                        synchronized(discoveryLock) {
+                            if (pendingResolutions[name] === token) pendingResolutions.remove(name)
+                        }
                         log("$TAG: 解析失败 ${info.serviceName} code=$errorCode")
                     }
                 }
@@ -163,9 +181,13 @@ class CarPlayServiceBrowser(
                         }
                     // 验收放在缓存之前：非车机端点（如同一 WiFi 上的 Mac）不得污染 awaitEndpoint
                     val accepted = accept(info)
+                    synchronized(discoveryLock) {
+                        if (pendingResolutions[name] !== token) return
+                        pendingResolutions.remove(name)
+                        if (accepted) resolved = info
+                    }
                     log("$TAG: OK ${info.serviceName} -> $host:${info.port}${if (accepted) "" else "（非车机，忽略）"}")
                     if (txt.isNotEmpty()) log("$TAG: TXT $txt")
-                    if (accepted) resolved = info
                     onEndpoint(info)
                 }
             }

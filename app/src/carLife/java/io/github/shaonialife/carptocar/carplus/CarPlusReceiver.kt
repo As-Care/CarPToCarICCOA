@@ -9,6 +9,7 @@ import io.github.shaonialife.carptocar.video.VideoSender
 internal object CarPlusReceiver {
     val status: String get() = ""
     val isSourceConnected: Boolean get() = false
+    val isRunning: Boolean get() = false
 
     fun start(context: Context, refresh: Boolean = false) = Unit
 
@@ -20,9 +21,9 @@ internal object CarPlusReceiver {
 
     fun attach(surface: Surface) = Unit
 
-    fun startVideo(sender: VideoSender, receiverIdentity: String, width: Int, height: Int) = false
+    fun startVideo(sender: VideoSender, receiverIdentity: String, width: Int, height: Int, receiverAddress: String? = null) = false
 
-    fun setCanvas(width: Int, height: Int) = Unit
+    fun setVideoConfig(width: Int, height: Int, fps: Int) = Unit
 
     fun stopVideo(sender: VideoSender?) = Unit
 

@@ -1,12 +1,14 @@
 package io.github.shaonialife.carptocar.bt
 
 import android.app.AlarmManager
+import android.app.KeyguardManager
 import android.app.NotificationManager
 import android.app.PendingIntent
 import android.content.Context
 import android.content.Intent
 import android.os.Handler
 import android.os.Looper
+import android.os.PowerManager
 import android.os.Process
 import android.os.SystemClock
 import io.github.shaonialife.carptocar.SessionController
@@ -14,39 +16,40 @@ import io.github.shaonialife.carptocar.service.CarIdleReceiver
 import io.github.shaonialife.carptocar.service.CarPlayService
 import io.github.shaonialife.carptocar.util.DebugFileLog
 
-/** Stops the session once the car's Bluetooth and CarPlay video links are both gone. */
+/** Stops the session when the car has been offline for 30 seconds and projection has ended. */
 object CarIdleGuard {
     /** 与 [CarIdleReceiver] 约好的内部动作（只在应用内显式广播，不对外导出）。 */
     const val ACTION_IDLE_TIMEOUT = "io.github.shaonialife.carptocar.action.CAR_IDLE_TIMEOUT"
 
     private const val REQUEST_CODE = 4101
-    private var disconnectedAddress: String? = null
+    private data class Departure(val address: String, val disconnectedAt: Long)
+    private val handler by lazy { Handler(Looper.getMainLooper()) }
+    private var departure: Departure? = null
+    private var scheduledCheck: Runnable? = null
     private var shutdownGeneration = 0
 
     fun onCarDisconnected(context: Context, address: String) {
-        disconnectedAddress = address
-        if (!finishAfterVideoLoss(context, address)) schedule(context)
+        if (address.equals(departure?.address, ignoreCase = true)) return
+        val now = SystemClock.elapsedRealtime()
+        departure = Departure(address, now)
+        schedule(context.applicationContext, now + CarIdlePolicy.IDLE_TIMEOUT_MILLIS)
     }
 
     fun onCarConnected(context: Context, address: String) {
-        val previous = disconnectedAddress
-        if (address.equals(previous, ignoreCase = true) ||
-            (previous == null && address.equals(TargetDevicePrefs.get(context)?.address, ignoreCase = true))
-        ) cancel(context)
-    }
-
-    fun onCarVideoEnded(context: Context, address: String?) {
-        Handler(Looper.getMainLooper()).post {
-            if (address != null) finishAfterVideoLoss(context, address)
+        val isTarget = address.equals(TargetDevicePrefs.get(context)?.address, ignoreCase = true)
+        val offlineCar = CarApproachPrefs.offlineCarAddress(context)
+        val returnedToCar = offlineCar != null && (isTarget || address.equals(offlineCar, ignoreCase = true))
+        if (returnedToCar) CarApproachPrefs.setOfflineCarAddress(context, null)
+        val pending = departure
+        if (address.equals(pending?.address, ignoreCase = true) ||
+            (pending == null && (returnedToCar || isTarget))
+        ) {
+            cancel(context)
         }
     }
 
-    private fun finishAfterVideoLoss(context: Context, address: String): Boolean {
-        if (!address.equals(disconnectedAddress, ignoreCase = true) ||
-            !SessionController.hasEndedCarVideo(address) || SessionController.isStreaming()
-        ) return false
-        finishDeparture(context, "车机蓝牙和 CarPlay 推流均已断开")
-        return true
+    fun onProjectionStopped(context: Context) {
+        handler.post { onTimeout(context) }
     }
 
     /**
@@ -56,16 +59,19 @@ object CarIdleGuard {
      */
     private const val KILL_DELAY_MILLIS = 600L
 
-    /** 起 30 秒计时（重复调用只是把到点时刻往后推，不会叠加多个闹钟）。 */
-    private fun schedule(context: Context) {
+    /** 设备唤醒时用 Handler 到点检查，休眠时由系统闹钟补做同一次检查。 */
+    private fun schedule(context: Context, deadline: Long) {
+        scheduledCheck?.let(handler::removeCallbacks)
+        val check = Runnable { onTimeout(context) }
+        scheduledCheck = check
+        handler.postDelayed(check, (deadline - SystemClock.elapsedRealtime()).coerceAtLeast(0L))
         val manager = context.getSystemService(Context.ALARM_SERVICE) as? AlarmManager ?: return
         val pending =
             pendingIntent(context, PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE) ?: return
-        val triggerAt = SystemClock.elapsedRealtime() + CarIdlePolicy.IDLE_TIMEOUT_MILLIS
         runCatching {
             manager.setAndAllowWhileIdle(
                 AlarmManager.ELAPSED_REALTIME_WAKEUP,
-                triggerAt,
+                deadline,
                 pending,
             )
         }
@@ -73,8 +79,14 @@ object CarIdleGuard {
 
     /** 车机回连（或用户主动给了新指令）时撤掉计时。 */
     fun cancel(context: Context) {
-        disconnectedAddress = null
+        departure = null
         shutdownGeneration++
+        cancelScheduledChecks(context)
+    }
+
+    private fun cancelScheduledChecks(context: Context) {
+        scheduledCheck?.let(handler::removeCallbacks)
+        scheduledCheck = null
         val manager = context.getSystemService(Context.ALARM_SERVICE) as? AlarmManager ?: return
         val pending = pendingIntent(context, PendingIntent.FLAG_NO_CREATE or PendingIntent.FLAG_IMMUTABLE) ?: return
         runCatching { manager.cancel(pending) }
@@ -83,37 +95,55 @@ object CarIdleGuard {
 
     /** 闹钟到点：[CarIdleReceiver] 转交进来，这里判定要不要真的收摊。 */
     fun onTimeout(context: Context) {
-        val address = disconnectedAddress ?: return
+        val pending = departure ?: return
         val active = SessionController.carPlayPeerAddress()
-        if (active != null && !address.equals(active, ignoreCase = true)) {
+        if (active != null && !pending.address.equals(active, ignoreCase = true)) {
             cancel(context)
             return
         }
-        when (CarIdlePolicy.onIdleTimeout(
-            aclConnected = false,
-            streaming = SessionController.isStreaming(),
-            uiVisible = AppUiPresence.isVisible,
-        )) {
-            CarIdlePolicy.Verdict.CLOSE -> finishDeparture(context, "车机蓝牙断开 30 秒未回连")
-            CarIdlePolicy.Verdict.UI_VISIBLE -> cancel(context)
-            CarIdlePolicy.Verdict.STREAMING -> Unit // 视频结束回调会继续判定。
-            CarIdlePolicy.Verdict.STILL_CONNECTED -> Unit
+        val target = TargetDevicePrefs.get(context)
+        val verdict = CarIdlePolicy.onIdleTimeout(
+            aclConnected = target != null && TargetDevicePrefs.matches(target, pending.address) &&
+                CarApproachPrefs.aclConnected(context),
+            disconnectedForMillis = SystemClock.elapsedRealtime() - pending.disconnectedAt,
+            streaming = SessionController.isCarProjectionActive(),
+            uiVisible = hasUnlockedUi(context),
+        )
+        when (verdict) {
+            CarIdlePolicy.Verdict.STOP_SESSION -> finishDeparture(context, pending.address, killProcess = false)
+            CarIdlePolicy.Verdict.STOP_PROCESS -> finishDeparture(context, pending.address, killProcess = true)
+            CarIdlePolicy.Verdict.STREAMING -> cancelScheduledChecks(context) // 视频结束会再次检查。
+            CarIdlePolicy.Verdict.STILL_CONNECTED -> cancel(context)
+            CarIdlePolicy.Verdict.WAITING -> Unit
         }
     }
 
-    private fun finishDeparture(context: Context, reason: String) {
+    private fun finishDeparture(context: Context, address: String, killProcess: Boolean) {
         if (!SessionController.hasCarWorkToStop()) {
             cancel(context)
             return
         }
+        CarApproachPrefs.setOfflineCarAddress(context, address)
         shutdown(
             context,
-            reason = reason,
-            killProcess = !AppUiPresence.isVisible,
+            reason = "车机蓝牙断开 30 秒未回连，投屏已结束",
+            killProcess = killProcess,
             suppressAutoStart = false,
             carDeparted = true,
         )
     }
+
+    fun onUiStopped(context: Context) {
+        if (SessionController.isCarOffline && !SessionController.hasCarWorkToStop() && isPhoneLocked(context)) {
+            scheduleExit(context.applicationContext, carDeparted = true)
+        }
+    }
+
+    private fun hasUnlockedUi(context: Context): Boolean = AppUiPresence.isVisible && !isPhoneLocked(context)
+
+    private fun isPhoneLocked(context: Context): Boolean =
+        context.getSystemService(PowerManager::class.java)?.isInteractive == false ||
+            context.getSystemService(KeyguardManager::class.java)?.isKeyguardLocked == true
 
     /**
      * 结束会话、停服务、清通知，可选地把进程也退掉。
@@ -155,13 +185,19 @@ object CarIdleGuard {
             manager.cancel(CarPlayService.NOTIFICATION_ID)
             manager.cancel(CarApproachReceiver.BLOCKED_NOTIFICATION_ID)
         }
-        if (!killProcess) return
+        if (killProcess) scheduleExit(context, carDeparted)
+    }
+
+    private fun scheduleExit(context: Context, carDeparted: Boolean) {
         val generation = shutdownGeneration
-        Handler(Looper.getMainLooper()).postDelayed(
+        handler.postDelayed(
             {
                 // killProcess 而不是 exit：走的是同一套「进程被回收」路径，
                 // 系统下一次投递 ACL_CONNECTED 时照样能把静态接收器拉起来。
-                if (generation == shutdownGeneration && (!carDeparted || !AppUiPresence.isVisible)) {
+                if (generation == shutdownGeneration &&
+                    (!carDeparted || SessionController.isCarOffline &&
+                        !SessionController.hasCarWorkToStop() && !hasUnlockedUi(context))
+                ) {
                     Process.killProcess(Process.myPid())
                 }
             },

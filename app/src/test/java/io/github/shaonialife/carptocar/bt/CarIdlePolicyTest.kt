@@ -3,33 +3,30 @@ package io.github.shaonialife.carptocar.bt
 import org.junit.Assert.assertEquals
 import org.junit.Test
 
-/**
- * 「车机远离 30 秒后该不该收摊」的判定测试（2026-10-30）。
- *
- * 要守住的三条底线：
- * 1. 车机又连上了 → **绝不**退出进程（否则会把正常重连打断）；
- * 2. 蓝牙断了但画面还在推（镜像走 WiFi）→ 也不退，用户正在用；
- * 3. 用户正开着界面看 → 还是不退（人还在用，掐掉等于闪退）。
- */
 class CarIdlePolicyTest {
     private fun verdict(
         aclConnected: Boolean = false,
+        disconnectedForMillis: Long = CarIdlePolicy.IDLE_TIMEOUT_MILLIS,
         streaming: Boolean = false,
         uiVisible: Boolean = false,
     ) = CarIdlePolicy.onIdleTimeout(
         aclConnected = aclConnected,
+        disconnectedForMillis = disconnectedForMillis,
         streaming = streaming,
         uiVisible = uiVisible,
     )
 
     @Test
     fun `链路断开且无画面无界面时收摊`() {
-        assertEquals(CarIdlePolicy.Verdict.CLOSE, verdict())
+        assertEquals(CarIdlePolicy.Verdict.STOP_PROCESS, verdict())
     }
 
     @Test
     fun `30 秒内车机回连则保留会话`() {
-        assertEquals(CarIdlePolicy.Verdict.STILL_CONNECTED, verdict(aclConnected = true))
+        assertEquals(
+            CarIdlePolicy.Verdict.STILL_CONNECTED,
+            verdict(aclConnected = true, disconnectedForMillis = 29_999L),
+        )
     }
 
     @Test
@@ -38,8 +35,17 @@ class CarIdlePolicyTest {
     }
 
     @Test
-    fun `用户正看着界面时不退进程`() {
-        assertEquals(CarIdlePolicy.Verdict.UI_VISIBLE, verdict(uiVisible = true))
+    fun `用户正看着界面时结束会话并保留界面`() {
+        assertEquals(CarIdlePolicy.Verdict.STOP_SESSION, verdict(uiVisible = true))
+    }
+
+    @Test
+    fun `画面提前结束也要等满 30 秒`() {
+        assertEquals(CarIdlePolicy.Verdict.WAITING, verdict(disconnectedForMillis = 29_999L))
+        assertEquals(
+            CarIdlePolicy.Verdict.STOP_PROCESS,
+            verdict(disconnectedForMillis = 30_000L),
+        )
     }
 
     @Test

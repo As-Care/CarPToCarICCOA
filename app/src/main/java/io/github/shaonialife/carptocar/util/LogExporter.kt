@@ -95,6 +95,11 @@ object LogExporter {
                     "Android ${Build.VERSION.RELEASE} (SDK ${Build.VERSION.SDK_INT})",
             )
             appendLine("==================================================")
+            ConnectionIncidentTimeline.latest(context)?.let { incident ->
+                appendLine("上次意外断链时间线")
+                appendLine(incident)
+                appendLine()
+            }
             val fileLog = DebugFileLog.read(context, currentSessionOnly = scope == Scope.CURRENT_SESSION)
             if (!fileLog.isNullOrBlank()) {
                 if (scope == Scope.CURRENT_SESSION) {

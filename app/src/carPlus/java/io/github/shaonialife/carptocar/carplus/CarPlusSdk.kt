@@ -21,6 +21,7 @@ import java.security.SecureRandom
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
+import java.util.concurrent.TimeUnit
 
 internal object CarPlusSdk {
     private const val BLE_TRACE_TAG = "CarPlusBle"
@@ -48,6 +49,8 @@ internal object CarPlusSdk {
     private var reconnectRetryAvailable = false
     private val reconnectRetry = Runnable { requestBackgroundReconnect() }
     private var casting = false
+    private var castFrameRateRequest: Any? = null
+    private var requestedCastFps: Int? = null
     private var surface: Surface? = null
     private var encodedOutput = false
     private var touchDown = false
@@ -67,6 +70,8 @@ internal object CarPlusSdk {
                     UCarConnectState.UCAR_DEVICE_DISCONNECT -> {
                         if (connected) {
                             connected = false
+                            requestedCastFps = null
+                            CarPlusVideoTap.resetAdvertisedFps()
                             pauseCast()
                             advertise()
                             if (reconnectAfterDisconnect) {
@@ -101,7 +106,7 @@ internal object CarPlusSdk {
             if (supported?.isSupportNormalCast == true) WorkMode.NORMAL_CAST else WorkMode.NONE
     }
 
-    fun start(context: Context, refresh: Boolean, canvas: CarPlusVideo.Size) {
+    fun start(context: Context, refresh: Boolean, request: CarPlusVideo.Request) {
         if (connected || initializing || advertising && !refresh) return
         wanted = true
         try {
@@ -113,7 +118,7 @@ internal object CarPlusSdk {
                 return
             }
             context.assets.open("ccd.data").close()
-            val config = config(context, canvas)
+            val config = config(context, request)
             sdk.registerCarConnectListener(connection)
             initializing = true
             updateStatus("正在初始化 ICCOA 接收端")
@@ -257,6 +262,8 @@ internal object CarPlusSdk {
         runCatching { adapter?.disconnect() }
         runCatching { adapter?.stopAdvertise() }
         discovery?.stopWatching(stopNative)
+        CarPlusVideoTap.resetAdvertisedFps()
+        requestedCastFps = null
         connected = false
         advertising = false
         updateStatus("ICCOA 接收端已停止 · 点此启动")
@@ -319,10 +326,21 @@ internal object CarPlusSdk {
         if (!wanted || !initialized || !connected) return
         val target = surface?.takeIf { it.isValid }
         if (target == null && !encodedOutput) return
+        val advertisedFps = CarPlusVideoTap.advertisedFps
+        val requestedFps = CarPlusVideoTap.request.fps
+        if (advertisedFps != null && advertisedFps != requestedFps) {
+            if (reconnectDeadline == null) {
+                report?.invoke(null, "ICCOA 视频帧率请求从 $advertisedFps 改为 $requestedFps fps，重新协商")
+                reconnectIfPaired(restartCurrent = true)
+            }
+            return
+        }
         if (!casting) {
+            requestFrameRateAfterFirstFrame(requestedFps)
             casting = runCatching {
                 adapter?.startCast(target, CarPlusVideo.WIDTH, CarPlusVideo.HEIGHT) == true
             }.getOrDefault(false)
+            if (!casting) cancelFrameRateRequest()
         }
         if (connected) {
             updateStatus(
@@ -333,7 +351,45 @@ internal object CarPlusSdk {
         }
     }
 
+    private fun requestFrameRateAfterFirstFrame(fps: Int) {
+        if (requestedCastFps == fps) return
+        val token = Any()
+        castFrameRateRequest = token
+        CarPlusVideoTap.onNextFrame {
+            // The first frame means the phone's virtual display is ready to apply the request.
+            main.post {
+                if (castFrameRateRequest !== token || !wanted || !connected || !casting) return@post
+                if (CarPlusVideoTap.request.fps != fps) return@post
+                castFrameRateRequest = null
+                val send = runCatching { adapter?.let { CarPlusFrameRateControl.request(it, fps) } }
+                val result = send.getOrNull()
+                if (result == null) {
+                    val cause = send.exceptionOrNull()?.javaClass?.simpleName ?: "控制通道未就绪"
+                    report?.invoke(null, "未能发送 Car+ $fps fps 会话请求（$cause）")
+                    return@post
+                }
+                requestedCastFps = fps
+                Bg.run("iccoa-frame-rate") {
+                    val sent = runCatching { result.get(1, TimeUnit.SECONDS) == true }.getOrDefault(false)
+                    main.post {
+                        report?.invoke(
+                            null,
+                            if (sent) "已向原生 Car+ 发送 $fps fps 会话请求"
+                            else "Car+ $fps fps 会话请求未确认发送",
+                        )
+                    }
+                }
+            }
+        }
+    }
+
+    private fun cancelFrameRateRequest() {
+        castFrameRateRequest = null
+        CarPlusVideoTap.onNextFrame(null)
+    }
+
     private fun pauseCast() {
+        cancelFrameRateRequest()
         if (!casting) return
         if (touchDown) sendTouch(MotionEvent.ACTION_CANCEL)
         touchDown = false
@@ -366,7 +422,8 @@ internal object CarPlusSdk {
         adapter?.sendTouchEvent(action, 1, intArrayOf(0), intArrayOf(touchX), intArrayOf(touchY)) == true
     }.getOrDefault(false)
 
-    private fun config(context: Context, canvas: CarPlusVideo.Size): UCarConfig {
+    private fun config(context: Context, request: CarPlusVideo.Request): UCarConfig {
+        val canvas = request.canvas ?: CarPlusVideo.defaultSize
         val prefs = context.getSharedPreferences("iccoa", Context.MODE_PRIVATE)
         val identity = prefs.getString("receiver_id", null)?.let { saved ->
             runCatching { Base64.decode(saved, Base64.NO_WRAP) }.getOrNull()?.takeIf { it.size == 6 }
@@ -381,7 +438,7 @@ internal object CarPlusSdk {
             .setCarCustomField(byteArrayOf(0x43, 0x50))
             .setDpi(320)
             .setRealDpi(context.resources.displayMetrics.densityDpi.coerceIn(120, 640))
-            .setFps(CarPlusVideo.FPS)
+            .setFps(request.fps)
             .setScreenWidth(canvas.width)
             .setScreenHeight(canvas.height)
             .setVideoDisplayWidth(canvas.width)

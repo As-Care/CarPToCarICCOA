@@ -20,8 +20,8 @@ internal class CarPlusReceiverService : Service() {
             START -> {
                 val replies = message.replyTo
                 val generation = message.arg1
-                val canvas = canvasFrom(message)
-                CarPlusVideoTap.requestedCanvas = canvas
+                val request = videoRequestFrom(message)
+                CarPlusVideoTap.request = request
                 CarPlusVideoTap.onSourceSize = { size ->
                     try {
                         replies.send(Message.obtain(null, VIDEO_SOURCE, generation, 0).apply {
@@ -48,10 +48,10 @@ internal class CarPlusReceiverService : Service() {
                     }
                 }
                 CarPlusSdk.report = ::report
-                CarPlusSdk.start(applicationContext, refresh = message.arg2 == 1, canvas = canvas ?: CarPlusVideo.defaultSize)
+                CarPlusSdk.start(applicationContext, refresh = message.arg2 == 1, request = request)
                 report(null, null)
             }
-            VIDEO_CANVAS -> CarPlusVideoTap.requestedCanvas = canvasFrom(message)
+            VIDEO_CONFIG -> CarPlusVideoTap.request = videoRequestFrom(message)
             SURFACE -> {
                 val data = message.data
                 val surface = if (Build.VERSION.SDK_INT >= 33) {
@@ -95,14 +95,17 @@ internal class CarPlusReceiverService : Service() {
 
     override fun onBind(intent: Intent): IBinder = endpoint.binder
 
-    private fun canvasFrom(message: Message): CarPlusVideo.Size? =
-        CarPlusVideo.displaySize(message.data.getInt(VIDEO_WIDTH), message.data.getInt(VIDEO_HEIGHT))
+    private fun videoRequestFrom(message: Message): CarPlusVideo.Request =
+        CarPlusVideo.Request(
+            CarPlusVideo.displaySize(message.data.getInt(VIDEO_WIDTH), message.data.getInt(VIDEO_HEIGHT)),
+            message.data.getInt(VIDEO_FPS, CarPlusVideo.FPS),
+        )
 
     override fun onDestroy() {
         CarPlusAudioTap.setTarget(null)
         CarPlusVideoTap.setTarget(null)
         CarPlusVideoTap.onSourceSize = null
-        CarPlusVideoTap.requestedCanvas = null
+        CarPlusVideoTap.request = CarPlusVideo.Request()
         CarPlusSdk.report = null
         CarPlusSdk.stop()
         super.onDestroy()
@@ -117,12 +120,13 @@ internal class CarPlusReceiverService : Service() {
         const val TOUCH_RELEASED = 6
         const val AUDIO_TARGET = 7
         const val VIDEO_TARGET = 8
-        const val VIDEO_CANVAS = 9
+        const val VIDEO_CONFIG = 9
         const val VIDEO_SOURCE = 10
         const val RECONNECT_IF_PAIRED = 11
         const val STOPPED = 12
         const val VIDEO_WIDTH = "videoWidth"
         const val VIDEO_HEIGHT = "videoHeight"
+        const val VIDEO_FPS = "videoFps"
         const val VIDEO_PIPE = "videoPipe"
         const val SURFACE_VALUE = "surface"
         const val STATUS_TEXT = "status"

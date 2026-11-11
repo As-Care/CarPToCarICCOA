@@ -240,7 +240,7 @@ class VideoSender(
     /** 推流是否活跃（静默降噪守卫判断用：start 失败时保持 false）。 */
     val isRunning: Boolean get() = running.get()
 
-    /** 已发送帧总数（英雄卡实时帧率 = 1s 轮询取差值）。 */
+    /** 已成功写入视频通道的帧总数。 */
     val framesSentTotal: Long get() = framesSent
 
     /**
@@ -439,6 +439,25 @@ class VideoSender(
 
     /** 按分辨率/帧率选 H.264 level：低了编码器会拒，高了车机解码器可能不认。 */
     private fun avcLevelFor(width: Int, height: Int, fps: Int): Int {
+        if (limitSurfaceFps && fps > 30) {
+            val columns = (width + 15) / 16
+            val rows = (height + 15) / 16
+            val blocks = columns * rows
+            val blocksPerSecond = blocks.toLong() * fps
+            val longEdge = maxOf(columns, rows)
+            // H.264 Annex A 限制每帧宏块数、长边与每秒宏块数。
+            return when {
+                blocks <= 3_600 && longEdge <= 169 && blocksPerSecond <= 108_000 ->
+                    MediaCodecInfo.CodecProfileLevel.AVCLevel31
+                blocks <= 5_120 && longEdge <= 202 && blocksPerSecond <= 216_000 ->
+                    MediaCodecInfo.CodecProfileLevel.AVCLevel32
+                blocks <= 8_704 && longEdge <= 263 && blocksPerSecond <= 522_240 ->
+                    MediaCodecInfo.CodecProfileLevel.AVCLevel42
+                blocks <= 36_864 && blocksPerSecond <= 983_040 ->
+                    MediaCodecInfo.CodecProfileLevel.AVCLevel51
+                else -> MediaCodecInfo.CodecProfileLevel.AVCLevel52
+            }
+        }
         val pixels = width.toLong() * height
         return when {
             pixels > 1280L * 720 ->
@@ -457,8 +476,11 @@ class VideoSender(
         when (level) {
             MediaCodecInfo.CodecProfileLevel.AVCLevel3 -> "3.0"
             MediaCodecInfo.CodecProfileLevel.AVCLevel31 -> "3.1"
+            MediaCodecInfo.CodecProfileLevel.AVCLevel32 -> "3.2"
             MediaCodecInfo.CodecProfileLevel.AVCLevel4 -> "4.0"
             MediaCodecInfo.CodecProfileLevel.AVCLevel42 -> "4.2"
+            MediaCodecInfo.CodecProfileLevel.AVCLevel51 -> "5.1"
+            MediaCodecInfo.CodecProfileLevel.AVCLevel52 -> "5.2"
             else -> "0x%X".format(level)
         }
 
@@ -475,6 +497,12 @@ class VideoSender(
         runCatching { surface?.release() }
         runCatching { socket?.close() }
         socket = null
+    }
+
+    fun endStream() {
+        running.set(false)
+        endOnce()
+        stop()
     }
 
     /**
@@ -548,13 +576,12 @@ class VideoSender(
             // 车机侧的会话已经没了（EOF/Broken pipe）：必须复位 running，否则
             // `isRunning` 会一直为 true，接收端重发 0x4301 时被「会话推流中」挡掉，
             // 表现为「车机重连了但画面永远不再出现」（2026-10-24 日志实测）。
-            stop()
             // 这条路径同样意味着「会话真的结束了」，必须通知上层——否则
             // `BtSessionGate.sessionActive` 永远停在 true（蓝牙探测被门闸挡住，车机
             // 再邀请也不会重连）、暗幕 45s 后把手机屏变黑、横屏覆盖不复原。
             // 旧实现只在 `drainEncoder` 的 finally 里回调，而当前产品只走直通，
             // 那个方法根本不会执行（2026-11-02 自查）。
-            endOnce()
+            endStream()
             log("VIDEO: 直通通道已失效——等待车机重新建立会话")
         }
     }
@@ -678,17 +705,26 @@ class VideoSender(
         sourceTimestampMs: Long? = null,
     ): Boolean {
         if (!running.get()) return false
+        return submitH264Nals(splitAnnexB(data), keyFrame, sourceTimestampMs)
+    }
+
+    /** Sends already parsed Annex B NAL units, avoiding a second split and copy on the ICCOA path. */
+    fun submitH264Nals(
+        nalUnits: List<ByteArray>,
+        keyFrame: Boolean,
+        sourceTimestampMs: Long?,
+    ): Boolean {
+        if (!running.get()) return false
         val output = try {
             socket?.getOutputStream()
         } catch (error: Exception) {
             null
         } ?: return false
         return try {
-            val nalUnits = splitAnnexB(data)
             if (nalUnits.isEmpty()) {
                 if (diagRejects < 3) {
                     diagRejects++
-                    log("VIDEO: 直通丢帧——NAL 拆分结果为空 size=${data.size}")
+                    log("VIDEO: 直通丢帧——NAL 拆分结果为空")
                 }
                 return false
             }
@@ -771,7 +807,7 @@ class VideoSender(
             // 先试着在接收端的 8s 恢复窗口内重连视频通道；连不回来才认输复位，
             // 让下一轮 0x4301 重新起会话。
             if (reconnectDataPort()) return false
-            stop()
+            endStream()
             false
         }
     }
@@ -868,9 +904,7 @@ class VideoSender(
             // 后台线程未捕获异常会杀死整个进程（曾导致锁屏后 app 消失）
             log("VIDEO: 推流中止 - ${error.message}（等待接收端恢复后重连）")
         } finally {
-            stop()
-            // 会话真实结束信号（静默降噪解除 / 状态收尾）
-            endOnce()
+            endStream()
         }
     }
 

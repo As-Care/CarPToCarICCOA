@@ -146,14 +146,14 @@ internal class CarPlusAudio(context: Context?) {
         val now = SystemClock.uptimeMillis()
         val playMusic = music.ready(now)
         val playGuidance = guidance.ready(now)
-        for (index in 0 until SAMPLES_PER_TICK) {
+        for (offset in output.indices step 2) {
             val media = if (playMusic) music.take() else 0
             val speech = if (playGuidance) guidance.take() else 0
-            val sample = ((if (playGuidance) media / 3 else media) + speech).coerceIn(-32768, 32767)
-            output[index * 2] = sample.toByte()
-            output[index * 2 + 1] = (sample shr 8).toByte()
+            val sample = (media + speech).coerceIn(Short.MIN_VALUE.toInt(), Short.MAX_VALUE.toInt())
+            output[offset] = sample.toByte()
+            output[offset + 1] = (sample shr 8).toByte()
         }
-        if (SessionController.currentClient === client) {
+        if (client?.isRetired == false && SessionController.currentClient === client) {
             SessionController.audioSender?.feedPcm(output, output.size, SAMPLE_RATE, 2)
         }
         nextTick = maxOf(nextTick + TICK_MS, SystemClock.uptimeMillis() - MAX_CATCH_UP_MS)

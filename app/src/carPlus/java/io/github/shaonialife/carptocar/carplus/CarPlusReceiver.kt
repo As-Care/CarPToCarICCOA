@@ -12,9 +12,11 @@ import android.os.Message
 import android.os.Messenger
 import android.os.ParcelFileDescriptor
 import android.os.RemoteException
+import android.os.SystemClock
 import android.view.Surface
 import io.github.shaonialife.carptocar.BuildConfig
 import io.github.shaonialife.carptocar.SessionController
+import io.github.shaonialife.carptocar.bt.CarIdleGuard
 import io.github.shaonialife.carptocar.input.TouchReports.Contact
 import io.github.shaonialife.carptocar.video.VideoSender
 import java.io.IOException
@@ -26,13 +28,24 @@ internal object CarPlusReceiver {
     private var receiver: Messenger? = null
     private var surface: Surface? = null
     private var scaler: CarPlusSurfaceScaler? = null
-    private var requestedCanvas: CarPlusVideo.Size? = null
+    private data class DirectDecoder(val output: Surface, val sender: VideoSender, val size: CarPlusVideo.Size)
+    private var directDecoder: DirectDecoder? = null
+    @Volatile private var videoRequest = CarPlusVideo.Request()
     @Volatile private var sourceSize = CarPlusVideo.defaultSize
     private var touchInImage = false
     private var encodedSender: VideoSender? = null
     private var encodedSize = CarPlusVideo.defaultSize
     private var encodedVideo: CarPlusEncodedVideo? = null
     private var allowOtherProfiles = false
+    private data class VideoRoute(
+        val receiver: String,
+        val address: String?,
+        val request: CarPlusVideo.Request,
+        val output: CarPlusVideo.Size,
+    )
+    private data class IncompatibleRoute(val route: VideoRoute, val format: CarPlusVideo.AvcFormat, val until: Long)
+    private var encodedRoute: VideoRoute? = null
+    @Volatile private var incompatibleRoute: IncompatibleRoute? = null
     @Volatile private var audio: CarPlusAudio? = null
     private var refreshPending = false
     private var bindingGeneration = 0
@@ -44,7 +57,7 @@ internal object CarPlusReceiver {
                     unbind()
                 }
                 CarPlusReceiverService.STATUS -> {
-                    isSourceConnected = message.data.getBoolean(CarPlusReceiverService.SOURCE_CONNECTED)
+                    updateSourceConnected(message.data.getBoolean(CarPlusReceiverService.SOURCE_CONNECTED))
                     message.data.getString(CarPlusReceiverService.STATUS_TEXT)?.let { status = it }
                     message.data.getString(CarPlusReceiverService.LOG_TEXT)?.let { SessionController.appendLog("ICCOA: $it") }
                 }
@@ -55,6 +68,10 @@ internal object CarPlusReceiver {
                     sourceSize = size
                     scaler?.sourceSize = size
                     SessionController.appendLog("ICCOA: Car+ 实际源画面 ${size.width}×${size.height}")
+                    directDecoder?.takeIf { it.output === surface && it.size != size }?.let {
+                        directDecoder = null
+                        if (it.sender.isRunning) attachScaled(it.output, it.sender, it.size)
+                    }
                 }
             }
         }
@@ -69,8 +86,17 @@ internal object CarPlusReceiver {
     }
         private set
 
+    val isRunning: Boolean get() = bindingContext != null && !pendingStop
+
+    @Volatile
     var isSourceConnected = false
         private set
+
+    private fun updateSourceConnected(connected: Boolean) {
+        val ended = isSourceConnected && !connected
+        isSourceConnected = connected
+        if (ended) bindingContext?.let(CarIdleGuard::onProjectionStopped)
+    }
 
     private val connection = object : ServiceConnection {
         override fun onServiceConnected(name: ComponentName, binder: IBinder) {
@@ -86,7 +112,7 @@ internal object CarPlusReceiver {
         override fun onServiceDisconnected(name: ComponentName) {
             if (bindingContext == null) return
             receiver = null
-            isSourceConnected = false
+            updateSourceConnected(false)
             status = "ICCOA 接收进程已断开 · 正在恢复"
         }
 
@@ -135,16 +161,25 @@ internal object CarPlusReceiver {
         }
     }
 
-    fun setCanvas(width: Int, height: Int) = onMain {
-        val canvas = CarPlusVideo.displaySize(width, height) ?: return@onMain
-        requestedCanvas = canvas
-        send(Message.obtain(null, CarPlusReceiverService.VIDEO_CANVAS).apply {
-            data = canvasBundle(canvas)
-        })
+    fun setVideoConfig(width: Int, height: Int, fps: Int) {
+        val canvas = CarPlusVideo.displaySize(width, height) ?: return
+        val request = CarPlusVideo.Request(canvas, fps)
+        videoRequest = request
+        onMain {
+            if (videoRequest === request) {
+                send(Message.obtain(null, CarPlusReceiverService.VIDEO_CONFIG).apply { data = videoBundle(request) })
+            }
+        }
     }
 
-    fun startVideo(sender: VideoSender, receiverIdentity: String, width: Int, height: Int): Boolean {
+    fun startVideo(sender: VideoSender, receiverIdentity: String, width: Int, height: Int, receiverAddress: String? = null): Boolean {
         val size = CarPlusVideo.Size(width, height)
+        val route = VideoRoute(receiverIdentity, receiverAddress, videoRequest, size)
+        val recentMismatch = incompatibleRoute?.takeIf { it.route == route && SystemClock.elapsedRealtime() < it.until }
+        if (BuildConfig.CAR_PLUS_VIDEO_RELAY && recentMismatch != null) {
+            SessionController.appendLog("ICCOA: 近期源档位不兼容（${recentMismatch.format}）· 直接使用 Surface")
+            return sender.start { attachDecoded(it, sender, size, recentMismatch.format.size) }
+        }
         if (!BuildConfig.CAR_PLUS_VIDEO_RELAY || !sender.startPassthrough(strictKeyFrames = true)) {
             return sender.start { attachScaled(it, sender, size) }
         }
@@ -154,6 +189,7 @@ internal object CarPlusReceiver {
                 encodedVideo = null
                 encodedSender = sender
                 encodedSize = size
+                encodedRoute = route
                 allowOtherProfiles = receiverIdentity.endsWith("AllPlay1,1")
                 connectEncodedVideo()
             }
@@ -162,14 +198,49 @@ internal object CarPlusReceiver {
     }
 
     private fun attachScaled(output: Surface, sender: VideoSender, size: CarPlusVideo.Size) {
-        val scaling = CarPlusSurfaceScaler(output, size.width, size.height, sender::stop)
+        val scaling = CarPlusSurfaceScaler(output, size.width, size.height, sender::endStream)
         scaling.sourceSize = sourceSize
-        attach(scaling.open(), scaling)
+        val input = runCatching { scaling.open() }.getOrElse {
+            SessionController.appendLog("ICCOA: 等比缩放初始化失败 · ${it.message}")
+            sender.endStream()
+            return
+        }
+        onMain {
+            if (sender.isRunning) {
+                directDecoder = null
+                attach(input, scaling)
+            } else {
+                scaling.close()
+            }
+        }
+    }
+
+    private fun attachDecoded(
+        output: Surface,
+        sender: VideoSender,
+        size: CarPlusVideo.Size,
+        actual: CarPlusVideo.Size?,
+    ) {
+        if (actual != size || sourceSize != size) {
+            attachScaled(output, sender, size)
+            return
+        }
+        onMain {
+            if (!sender.isRunning || !output.isValid) return@onMain
+            if (sourceSize != size) {
+                attachScaled(output, sender, size)
+            } else {
+                directDecoder = DirectDecoder(output, sender, size)
+                attach(output)
+                SessionController.appendLog("ICCOA: 源画面与码流同尺寸 · 解码输出直接交给编码器")
+            }
+        }
     }
 
     fun stopVideo(sender: VideoSender?) = onMain {
         if (sender != null && encodedSender === sender) {
             encodedSender = null
+            encodedRoute = null
             encodedVideo?.close()
             encodedVideo = null
             touchInImage = false
@@ -183,8 +254,8 @@ internal object CarPlusReceiver {
         if (encodedVideo != null || !sender.isRunning) return
         try {
             val (input, output) = ParcelFileDescriptor.createSocketPair()
-            val video = CarPlusEncodedVideo(input, sender, encodedSize, allowOtherProfiles, main) { failed, reason ->
-                if (encodedVideo === failed) fallBack(sender, reason)
+            val video = CarPlusEncodedVideo(input, sender, encodedSize, allowOtherProfiles, main) { failed, reason, format ->
+                if (encodedVideo === failed) fallBack(sender, reason, format)
             }
             encodedVideo = video
             video.start()
@@ -201,20 +272,28 @@ internal object CarPlusReceiver {
         }
     }
 
-    private fun fallBack(sender: VideoSender, reason: String) {
+    private fun fallBack(sender: VideoSender, reason: String, format: CarPlusVideo.AvcFormat? = null) {
         if (encodedSender !== sender) return
+        if (format != null && sender.isRunning) {
+            encodedRoute?.let { route ->
+                // A confirmed SPS mismatch can skip the probe on the next quick reconnect.
+                incompatibleRoute = IncompatibleRoute(route, format, SystemClock.elapsedRealtime() + SOURCE_PROBE_RETRY_MS)
+            }
+        }
+        encodedRoute = null
         encodedVideo?.close()
         encodedVideo = null
         encodedSender = null
         if (!sender.isRunning) return
         SessionController.appendLog("ICCOA: $reason · 切回 Surface")
         val size = encodedSize
-        sender.fallBackToSurface { attachScaled(it, sender, size) }
+        sender.fallBackToSurface { attachDecoded(it, sender, size, format?.size) }
     }
 
     fun detach(surface: Surface) = onMain {
         if (this.surface === surface || scaler?.output === surface) {
             this.surface = null
+            directDecoder = null
             sendSurface(null)
             scaler?.close()
             scaler = null
@@ -260,12 +339,13 @@ internal object CarPlusReceiver {
                 unbind()
             }
             surface = null
+            directDecoder = null
             scaler?.close()
             scaler = null
             touchInImage = false
             refreshPending = false
-            requestedCanvas = null
-            isSourceConnected = false
+            videoRequest = CarPlusVideo.Request()
+            updateSourceConnected(false)
             status = "ICCOA 接收端已停止 · 点此启动"
         }
     }
@@ -304,15 +384,16 @@ internal object CarPlusReceiver {
     private fun startRemote(refresh: Boolean) {
         send(Message.obtain(null, CarPlusReceiverService.START, bindingGeneration, if (refresh) 1 else 0).apply {
             replyTo = replies
-            data = canvasBundle(requestedCanvas)
+            data = videoBundle(videoRequest)
         })
     }
 
-    private fun canvasBundle(canvas: CarPlusVideo.Size?): Bundle = Bundle().apply {
-        if (canvas != null) {
-            putInt(CarPlusReceiverService.VIDEO_WIDTH, canvas.width)
-            putInt(CarPlusReceiverService.VIDEO_HEIGHT, canvas.height)
+    private fun videoBundle(request: CarPlusVideo.Request): Bundle = Bundle().apply {
+        request.canvas?.let {
+            putInt(CarPlusReceiverService.VIDEO_WIDTH, it.width)
+            putInt(CarPlusReceiverService.VIDEO_HEIGHT, it.height)
         }
+        putInt(CarPlusReceiverService.VIDEO_FPS, request.fps)
     }
 
     private fun sendSurface(surface: Surface?) {
@@ -328,6 +409,7 @@ internal object CarPlusReceiver {
             true
         } catch (_: RemoteException) {
             receiver = null
+            updateSourceConnected(false)
             status = "ICCOA 接收进程已断开 · 正在恢复"
             false
         }
@@ -335,7 +417,7 @@ internal object CarPlusReceiver {
 
     private fun unbind() {
         pendingStop = false
-        isSourceConnected = false
+        updateSourceConnected(false)
         val app = bindingContext
         bindingContext = null
         receiver = null
@@ -345,4 +427,6 @@ internal object CarPlusReceiver {
     private fun onMain(action: () -> Unit) {
         if (Looper.myLooper() == main.looper) action() else main.post { action() }
     }
+
+    private const val SOURCE_PROBE_RETRY_MS = 120_000L
 }

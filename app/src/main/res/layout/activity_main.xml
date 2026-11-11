@@ -1347,6 +1347,55 @@
                         android:visibility="gone" />
                 </LinearLayout>
 
+                <LinearLayout
+                    android:id="@+id/carPlusFrameRatePanel"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="14dp"
+                    android:orientation="vertical"
+                    android:visibility="gone">
+
+                    <TextView
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:accessibilityHeading="true"
+                        android:text="@string/carplus_frame_rate"
+                        android:textColor="@color/m3_on_surface"
+                        android:textSize="14sp"
+                        android:textStyle="bold" />
+
+                    <RadioGroup
+                        android:id="@+id/carPlusFrameRateOptions"
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:orientation="horizontal">
+
+                        <RadioButton
+                            android:id="@+id/carPlusFrameRate30"
+                            android:layout_width="wrap_content"
+                            android:layout_height="wrap_content"
+                            android:minHeight="48dp"
+                            android:text="@string/carplus_frame_rate_30"
+                            android:textColor="@color/m3_on_surface" />
+
+                        <RadioButton
+                            android:id="@+id/carPlusFrameRate60"
+                            android:layout_width="wrap_content"
+                            android:layout_height="wrap_content"
+                            android:layout_marginStart="12dp"
+                            android:minHeight="48dp"
+                            android:text="@string/carplus_frame_rate_60"
+                            android:textColor="@color/m3_on_surface" />
+                    </RadioGroup>
+
+                    <TextView
+                        android:id="@+id/carPlusFrameRateNote"
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:textColor="@color/m3_on_var"
+                        android:textSize="12sp" />
+                </LinearLayout>
+
                 <!-- 触摸注入节流 -->
                 <TextView
                     android:layout_width="wrap_content"

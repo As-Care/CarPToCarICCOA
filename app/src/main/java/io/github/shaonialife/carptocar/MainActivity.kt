@@ -30,6 +30,7 @@ import android.widget.EditText
 import android.widget.FrameLayout
 import android.widget.ImageView
 import android.widget.LinearLayout
+import android.widget.RadioGroup
 import android.widget.SeekBar
 import android.widget.TextView
 import android.widget.Toast
@@ -43,6 +44,7 @@ import io.github.shaonialife.carptocar.bt.BtCompatPrefs
 import io.github.shaonialife.carptocar.bt.BtProfiles
 import io.github.shaonialife.carptocar.bt.CarApproachPrefs
 import io.github.shaonialife.carptocar.bt.CarApproachReceiver
+import io.github.shaonialife.carptocar.bt.CarIdleGuard
 import io.github.shaonialife.carptocar.bt.TargetDevicePrefs
 import io.github.shaonialife.carptocar.carlife.CarLifeHijack
 import io.github.shaonialife.carptocar.carplus.CarPlusReceiver
@@ -63,6 +65,7 @@ import io.github.shaonialife.carptocar.ui.ScreenDimmer
 import io.github.shaonialife.carptocar.ui.SignalWavesView
 import io.github.shaonialife.carptocar.util.AppVersion
 import io.github.shaonialife.carptocar.util.Bg
+import io.github.shaonialife.carptocar.util.ConnectionIncidentTimeline
 import io.github.shaonialife.carptocar.util.ConnectionIssueSummary
 import io.github.shaonialife.carptocar.util.DeviceIdentity
 import io.github.shaonialife.carptocar.util.LogDisplayLevel
@@ -71,6 +74,7 @@ import io.github.shaonialife.carptocar.util.SysShell
 import io.github.shaonialife.carptocar.video.StreamFps
 import io.github.shaonialife.carptocar.video.VideoSender
 import java.util.Locale
+import kotlin.math.roundToInt
 
 /**
  * 「靠近车机」自动启动标记（2026-10-30）：由 [io.github.shaonialife.carptocar.bt.CarApproachReceiver]
@@ -153,6 +157,7 @@ class MainActivity : AppCompatActivity() {
 
     // ---- 英雄卡状态机（1s 轮询 SessionController 对账）----
     private var heroState: HeroState? = null
+    private var heroCarOffline = false
     private var connectedAt = 0L
     private var heroVideoSender: VideoSender? = null
     private var carPlusPictureMissingAt = 0L
@@ -166,6 +171,8 @@ class MainActivity : AppCompatActivity() {
 
     // 英雄卡实时帧率：1s 轮询对 VideoSender 已发帧计数取差值
     private var lastSentFrames = 0L
+    private var lastFpsSampleAt = 0L
+    private var actualSentFps: Int? = null
 
     /** 免责声明倒计时截止时刻（elapsedRealtime；旋转重建后透传，不重新计时）。 */
     private var disclaimerDeadlineAt = 0L
@@ -252,7 +259,7 @@ class MainActivity : AppCompatActivity() {
             val openGuide = openCarPlusAfterPermission
             openCarPlusAfterPermission = false
             if (hasCarPlusPermissions()) {
-                CarPlusReceiver.start(this)
+                if (openGuide || !SessionController.isCarOffline) CarPlusReceiver.start(this)
                 maybeAutoConnect()
                 if (openGuide) openSystemCarPlus()
             } else {
@@ -288,6 +295,7 @@ class MainActivity : AppCompatActivity() {
 
     private fun startCarPlusOnLaunch() {
         if (!BuildConfig.CAR_PLUS_RUNTIME || carPlusStartupAttempted || isFinishing || isDestroyed) return
+        if (SessionController.isCarOffline) return
         if (!DisclaimerPrefs.hasAcceptedCurrent(this)) return
         carPlusStartupAttempted = true
         startCarPlusReceiver()
@@ -349,6 +357,7 @@ class MainActivity : AppCompatActivity() {
      */
     private fun maybeAutoConnect() {
         if (!autoConnectRequested || isFinishing || isDestroyed) return
+        if (SessionController.isCarOffline) return
         if (!AutoConnectPrefs.enabled(this)) {
             autoConnectRequested = false
             log("AUTOCONNECT: 已关闭——等待手动点「启动连接」")
@@ -769,7 +778,7 @@ class MainActivity : AppCompatActivity() {
         if (heroState == HeroState.IDLE) {
             ctaButton.alpha = if (mac == null) CTA_BLOCKED_ALPHA else 1f
             if (pendingResidualDisplays == null) {
-                heroSubline.text = if (mac == null) HINT_MAC_MISSING else HINT_IDLE_READY
+                heroSubline.text = idleConnectionHint(macMissing = mac == null)
             }
         }
     }
@@ -1424,7 +1433,7 @@ class MainActivity : AppCompatActivity() {
     private fun updateCarLifeStatus() {
         val text =
             when {
-                BuildConfig.CAR_PLUS -> if (hasCarPlusPicture(SessionController.videoSender)) {
+                BuildConfig.CAR_PLUS -> if (SessionController.isCarProjectionActive()) {
                     "CarPlay 正在接收 ICCOA Car+ 画面"
                 } else {
                     CarPlusReceiver.status
@@ -1447,7 +1456,8 @@ class MainActivity : AppCompatActivity() {
             heroVideoSender = sender
             connectedAt = SystemClock.elapsedRealtime()
             carPlusPictureMissingAt = 0L
-            lastSentFrames = 0L
+            lastFpsSampleAt = 0L
+            actualSentFps = null
         }
         val s =
             when {
@@ -1456,8 +1466,10 @@ class MainActivity : AppCompatActivity() {
                     HeroState.CONNECTING
                 else -> HeroState.IDLE
             }
-        if (s != heroState) {
+        val offline = SessionController.isCarOffline
+        if (s != heroState || offline != heroCarOffline) {
             heroState = s
+            heroCarOffline = offline
             applyHeroState(s)
         }
         // 连接中：副标题跟随阶段提示（英雄卡内即可见，不必划到底部看日志）
@@ -1473,7 +1485,10 @@ class MainActivity : AppCompatActivity() {
         refreshCarHotspot()
         updateConnectedSubline()
         updateHeroStats()
-        if (BuildConfig.CAR_PLUS) refreshResolutionInputs()
+        if (BuildConfig.CAR_PLUS) {
+            refreshResolutionInputs()
+            refreshCarPlusFrameRate()
+        }
         updateDisplayResolutionNote()
         updateAudioTag()
         updateReadyRow()
@@ -1490,9 +1505,12 @@ class MainActivity : AppCompatActivity() {
             else "正在重新连接车机…"
         } ?: SessionController.phaseHint ?: DEFAULT_CONNECTING_HINT
 
-    // Car+ 可以在静止画面时暂时不发新帧。源会话还在线且已发过首帧，就仍在投屏。
-    private fun hasCarPlusPicture(sender: VideoSender?): Boolean =
-        CarPlusReceiver.isSourceConnected && sender?.isRunning == true && sender.framesSentTotal > 0
+    private fun idleConnectionHint(macMissing: Boolean): String =
+        when {
+            macMissing -> HINT_MAC_MISSING
+            SessionController.isCarOffline -> "等待车机下次连接"
+            else -> HINT_IDLE_READY
+        }
 
     /**
      * 当前真正在用的码流尺寸。
@@ -1538,10 +1556,14 @@ class MainActivity : AppCompatActivity() {
      */
     private fun updateHeroStats() {
         if (heroState != HeroState.CONNECTED) return
-        val sent = SessionController.videoSender?.framesSentTotal ?: 0
-        if (sent < lastSentFrames) lastSentFrames = sent
-        val fps = sent - lastSentFrames
+        val sent = heroVideoSender?.framesSentTotal ?: return
+        val now = SystemClock.elapsedRealtime()
+        val elapsed = now - lastFpsSampleAt
+        actualSentFps = if (lastFpsSampleAt > 0 && elapsed > 0 && sent >= lastSentFrames) {
+            ((sent - lastSentFrames) * 1_000.0 / elapsed).roundToInt()
+        } else null
         lastSentFrames = sent
+        lastFpsSampleAt = now
         val carW = SessionController.activeCarWidth
         val carH = SessionController.activeCarHeight
         val stream = effectiveStreamSize()
@@ -1555,7 +1577,7 @@ class MainActivity : AppCompatActivity() {
                 stream == null || (stream.first == carW && stream.second == carH) -> "$carW×$carH"
                 else -> "$carW×$carH → ${stream.first}×${stream.second}"
             }
-        heroStats.text = "分辨率 $resolution · $fps fps"
+        heroStats.text = "分辨率 $resolution · 实际发送 ${actualSentFps ?: "—"} fps"
     }
 
     /**
@@ -1572,7 +1594,7 @@ class MainActivity : AppCompatActivity() {
             val nextSize = DisplayPrefs.carPlusStreamSize(this, nextPeer?.address)
             val text = buildList {
                 if (running) {
-                    val current = effectiveStreamSize().takeIf { hasCarPlusPicture(heroVideoSender) }
+                    val current = effectiveStreamSize().takeIf { SessionController.isCarProjectionActive(heroVideoSender) }
                     add("当前投屏 · " + (current?.let { "${it.first}×${it.second}" } ?: "等待 Car+ 画面"))
                     val w = SessionController.activeCarWidth
                     val h = SessionController.activeCarHeight
@@ -1663,7 +1685,7 @@ class MainActivity : AppCompatActivity() {
 
         heroStateText.text =
             when (s) {
-                HeroState.IDLE -> "未连接"
+                HeroState.IDLE -> if (SessionController.isCarOffline) "车机已离线" else "未连接"
                 HeroState.CONNECTING -> "正在连接"
                 HeroState.CONNECTED -> "已连接"
             }
@@ -1679,8 +1701,7 @@ class MainActivity : AppCompatActivity() {
                 heroSubline.text =
                     when {
                         pending != null -> "上次会话异常退出，遗留 ${pending.size} 个虚拟屏待清理"
-                        macMissing -> HINT_MAC_MISSING
-                        else -> HINT_IDLE_READY
+                        else -> idleConnectionHint(macMissing)
                     }
                 styleCta(
                     R.drawable.bg_cta_fill,
@@ -1745,7 +1766,7 @@ class MainActivity : AppCompatActivity() {
             heroSubline.text = "$details · 视频推流中"
             return
         }
-        val flowing = hasCarPlusPicture(heroVideoSender)
+        val flowing = SessionController.isCarProjectionActive(heroVideoSender)
         if (flowing) carPlusPictureMissingAt = 0L
         else if (carPlusPictureMissingAt == 0L) carPlusPictureMissingAt = now
         val waitingTooLong = !flowing && now - carPlusPictureMissingAt >= CAR_PLUS_PICTURE_WAIT_MS
@@ -1801,13 +1822,60 @@ class MainActivity : AppCompatActivity() {
             )
         }
 
-        if (BuildConfig.CAR_PLUS) bindCarPlusStreamSize() else bindStreamScale()
-
-        // 目标帧率没有设置项：车机 /info 报 maxFPS 就跟随，没报按 60（见 video/StreamFps.kt）。
-        // 这里先按默认 60 起，等 SETUP 拿到车机值后由 SessionController 覆盖。
-        VirtualLauncher.setStreamFps(StreamFps.DEFAULT_FPS)
+        if (BuildConfig.CAR_PLUS) {
+            bindCarPlusStreamSize()
+            if (BuildConfig.CAR_PLUS_RUNTIME) bindCarPlusFrameRate()
+        } else {
+            bindStreamScale()
+            VirtualLauncher.setStreamFps(StreamFps.DEFAULT_FPS)
+        }
 
         bindTouchThrottle()
+    }
+
+    private fun carPlusFrameRatePeer(): TargetDevicePrefs.Target? =
+        TargetDevicePrefs.get(this) ?: SessionController.activeCarPlusPeer.takeIf { SessionController.isStreaming() }
+
+    private fun bindCarPlusFrameRate() {
+        findViewById<View>(R.id.carPlusFrameRatePanel).visibility = View.VISIBLE
+        val options = findViewById<RadioGroup>(R.id.carPlusFrameRateOptions)
+        for (index in 0 until options.childCount) {
+            options.getChildAt(index).setOnClickListener { option ->
+                val peer = carPlusFrameRatePeer() ?: return@setOnClickListener
+                DisplayPrefs.setCarPlusHighFps(this, peer.address, option.id == R.id.carPlusFrameRate60)
+                refreshCarPlusFrameRate()
+                snack(getString(R.string.carplus_frame_rate_saved, peer.name))
+            }
+        }
+        refreshCarPlusFrameRate()
+    }
+
+    private fun refreshCarPlusFrameRate() {
+        if (!BuildConfig.CAR_PLUS_RUNTIME) return
+        val peer = carPlusFrameRatePeer()
+        val maxFps = DisplayPrefs.carPlusCarMaxFps(this, peer?.address)
+        val canUse60 = CarPlusVideo.supportsHighFps(maxFps)
+        val saved60 = DisplayPrefs.carPlusHighFps(this, peer?.address)
+        val options = findViewById<RadioGroup>(R.id.carPlusFrameRateOptions)
+        val checked = if (canUse60 && saved60) R.id.carPlusFrameRate60 else R.id.carPlusFrameRate30
+        if (options.checkedRadioButtonId != checked) options.check(checked)
+        findViewById<View>(R.id.carPlusFrameRate30).isEnabled = peer != null
+        findViewById<View>(R.id.carPlusFrameRate60).apply {
+            isEnabled = canUse60
+            alpha = if (canUse60) 1f else 0.45f
+        }
+        val capability = when {
+            peer == null -> getString(R.string.carplus_frame_rate_select_device)
+            canUse60 -> getString(R.string.carplus_frame_rate_next_connection, peer.name)
+            maxFps > 0 -> getString(R.string.carplus_frame_rate_limited, peer.name, maxFps)
+            else -> getString(R.string.carplus_frame_rate_unknown, peer.name)
+        }
+        val current = if (heroVideoSender != null) {
+            getString(R.string.carplus_frame_rate_current, SessionController.activeTargetFps, actualSentFps?.toString() ?: "—")
+        } else null
+        val note = findViewById<TextView>(R.id.carPlusFrameRateNote)
+        val text = if (current == null) capability else "$capability\n$current"
+        if (note.text != text) note.text = text
     }
 
     private fun bindCarPlusStreamSize() {
@@ -2606,12 +2674,14 @@ class MainActivity : AppCompatActivity() {
     private fun copyIssueSummary() {
         val target = SessionController.activeCarPlusPeer ?: TargetDevicePrefs.get(this)
         val sender = SessionController.videoSender
-        val projecting = if (BuildConfig.CAR_PLUS) hasCarPlusPicture(sender) else sender?.isVideoFlowing == true
+        val projecting = if (BuildConfig.CAR_PLUS) SessionController.isCarProjectionActive(sender)
+            else sender?.isVideoFlowing == true
         val stage = when {
             SessionController.disconnecting -> "正在断开连接"
             projecting -> "正在投屏"
             sender?.isRunning == true -> "车机已连接，等待${if (BuildConfig.CAR_PLUS) " Car+" else ""}画面"
             SessionController.isSessionRunning() || SessionController.sessionStarting.get() -> connectingMessage()
+            SessionController.isCarOffline -> "车机已离线"
             else -> "未连接"
         }
         val summary = ConnectionIssueSummary.format(
@@ -2620,6 +2690,7 @@ class MainActivity : AppCompatActivity() {
             target = target?.name ?: "自动选择",
             currentStage = stage,
             logs = SessionController.logText(),
+            incident = ConnectionIncidentTimeline.latest(this),
         )
         val clipboard = getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
         clipboard.setPrimaryClip(ClipData.newPlainText("连接故障摘要", summary))
@@ -3080,8 +3151,10 @@ class MainActivity : AppCompatActivity() {
             CarPlusResolutionHistory.preferences(this).registerOnSharedPreferenceChangeListener(displayHistoryListener)
             renderDisplayHistory()
         }
-        // 界面在前台 = 用户正看着：车机远离 30 秒后的收摊要让路（别把正在看的界面掐掉）
+        // 离车时保留用户正在看的界面。
         AppUiPresence.markResumed()
+        lastFpsSampleAt = 0L
+        actualSentFps = null
         mainHandler.post(heroTick)
         // 从系统设置/别的界面回来：门禁提示与按钮状态重新对一次（地址可能已补填）
         refreshMacGate()
@@ -3237,6 +3310,11 @@ class MainActivity : AppCompatActivity() {
         }
         AppUiPresence.markPaused()
         mainHandler.removeCallbacks(heroTick)
+    }
+
+    override fun onStop() {
+        super.onStop()
+        CarIdleGuard.onUiStopped(this)
     }
 
     override fun onDestroy() {

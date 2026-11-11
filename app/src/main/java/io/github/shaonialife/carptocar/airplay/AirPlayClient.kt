@@ -81,7 +81,11 @@ class AirPlayClient(
     @Volatile
     private var endpointGeneration = 0
 
-    private var socket: Socket? = null
+    @Volatile private var socket: Socket? = null
+    private val retired = java.util.concurrent.atomic.AtomicBoolean(false)
+    val isRetired: Boolean get() = retired.get()
+    @Volatile private var recorded = false
+    @Volatile var onControlLost: (() -> Unit)? = null
     private var cSeq = 0
 
     /**
@@ -743,9 +747,20 @@ class AirPlayClient(
         }
 
     /** 心跳线程的存活判据：RTSP socket 仍连着。 */
-    private fun isSessionAlive(): Boolean = socket?.isClosed == false
+    private fun isSessionAlive(): Boolean = !isRetired && socket?.isClosed == false
+
+    /** Permanently stop this client. Pairing retries use [close] and can reuse the client. */
+    fun retire(): Boolean {
+        if (!retired.compareAndSet(false, true)) return false
+        cancelled = true
+        close()
+        controlIapTx.shutdownNow()
+        timingServer.stop()
+        return true
+    }
 
     fun close() {
+        recorded = false
         // 先记下「这次关闭会不会打断某个在飞的请求」：会把等待中的 CSeq 判死，
         // 对配对来说这就是一次「本机打断」，不能算车机的结论。
         val inFlight = pendingResponses.isNotEmpty()
@@ -771,6 +786,11 @@ class AirPlayClient(
         runCatching { iapTunnel?.socket?.close() }
         iapTunnel = null
         iapLink = null
+        synchronized(eventSocketLock) {
+            runCatching { eventCommandSocket?.close() }
+            eventCommandSocket = null
+            eventCommandCipher = null
+        }
         // 注意：controlIapTx 不在这里 shutdown——close() 会被同实例的重试路径
         // （retryWithPairing 等）复用，杀掉执行器会废掉重连后的 MIB3 出站；
         // 守护线程常驻的代价可忽略（每客户端实例一根）
@@ -822,6 +842,7 @@ class AirPlayClient(
     private var eventCommandCipher: ControlCipher? = null
 
     private val eventCommandLock = Any()
+    private val eventSocketLock = Any()
     private var eventCseq = 0
 
     /** 未知请求（非 /command 的合法请求）累计数：前 10 条留痕后静默。 */
@@ -844,9 +865,11 @@ class AirPlayClient(
     private fun registerEventCommandChannel(
         socket: Socket,
         cipher: ControlCipher?,
-    ) {
-        eventCommandSocket = socket
+    ): Boolean = synchronized(eventSocketLock) {
+        if (isRetired) return@synchronized false
         eventCommandCipher = cipher
+        eventCommandSocket = socket
+        true
     }
 
     /** 在事件通道上发 POST /command（通道加密时加密）。通道未就绪时返回 false。 */
@@ -909,19 +932,22 @@ class AirPlayClient(
         }
     }
 
-    @Volatile private var mainAudioMode = MainAudioMode()
+    @Volatile private var resourceModes = CarPlayResourceModes()
 
-    /** Reports only ownership changes so repeated requests cannot replay media keys. */
-    internal fun updateMainAudioMode(params: Map<*, *>?): Boolean? {
+    internal val carOwnsMainAudio: Boolean get() = resourceModes.mainAudio.carOwns
+
+    /** Applies both resources and returns only main-audio transitions for media key handling. */
+    internal fun updateResourceModes(params: Map<*, *>?): Boolean? {
         val resources = params?.get("resources") as? List<*> ?: emptyList<Any>()
-        val previous = mainAudioMode
+        val previous = resourceModes
         val next = previous.applyRequest(resources)
-        mainAudioMode = next
-        log("EVENT: changeModes resources=$resources reason=${params?.get("reasonStr")} mainAudio=${next.resource()}")
-        return next.carOwnsAudio.takeIf { it != previous.carOwnsAudio }
+        resourceModes = next
+        log("EVENT: changeModes resources=$resources reason=${params?.get("reasonStr")} modes=${next.report()}")
+        return next.mainAudio.carOwns.takeIf { it != previous.mainAudio.carOwns }
     }
 
     fun assertModes(): Boolean {
+        val modes = resourceModes
         val body =
             BinaryPlist.encode(
                 linkedMapOf(
@@ -934,11 +960,7 @@ class AirPlayClient(
                                     linkedMapOf<String, Any?>("appStateID" to 3L, "entity" to 0L),
                                     linkedMapOf<String, Any?>("appStateID" to 1L, "entity" to 0L, "speechMode" to -1L),
                                 ),
-                            "resources" to
-                                listOf(
-                                    linkedMapOf<String, Any?>("resourceID" to 1L, "entity" to 1L, "permanentEntity" to 1L),
-                                    mainAudioMode.resource(),
-                                ),
+                            "resources" to modes.report(),
                         ),
                 ),
             )
@@ -950,7 +972,10 @@ class AirPlayClient(
                     body,
                     contentType = "application/x-apple-binary-plist",
                 )
-            log("AIRPLAY: modesChanged（主音频归属=${mainAudioMode.resource()["entity"]}）[$statusLine]")
+            log(
+                "AIRPLAY: modesChanged（主屏=${if (modes.mainScreen.carOwns) "车机" else "手机"} · " +
+                    "主音频=${if (modes.mainAudio.carOwns) "车机" else "手机"}）[$statusLine]",
+            )
             statusLine.contains("200")
         } catch (error: IOException) {
             log("AIRPLAY: modesChanged 失败 - ${error.message}")
@@ -1785,7 +1810,7 @@ class AirPlayClient(
      */
     fun awaitControlSession(timeoutMs: Long = 4_000): Boolean {
         val deadline = android.os.SystemClock.uptimeMillis() + timeoutMs
-        while (android.os.SystemClock.uptimeMillis() < deadline) {
+        while (!isRetired && android.os.SystemClock.uptimeMillis() < deadline) {
             if (controlSessionReady) return true
             try {
                 Thread.sleep(100)
@@ -1836,7 +1861,9 @@ class AirPlayClient(
     private var controlIapCount = 0
 
     fun postControlIap(frame: ByteArray) {
-        controlIapTx.execute {
+        if (!isSessionAlive()) return
+        val task = Runnable {
+            if (!isSessionAlive()) return@Runnable
             try {
                 val body =
                     BinaryPlist.encode(
@@ -1866,8 +1893,13 @@ class AirPlayClient(
                     iapLink?.onCarBytes(reply)
                 }
             } catch (error: IOException) {
-                log("IAPLINK: 控制通道 POST 失败 - ${error.message}")
+                if (!isRetired) log("IAPLINK: 控制通道 POST 失败 - ${error.message}")
             }
+        }
+        try {
+            controlIapTx.execute(task)
+        } catch (_: java.util.concurrent.RejectedExecutionException) {
+            // The session ended while the iAP2 link was producing its last frame.
         }
     }
 
@@ -2813,6 +2845,7 @@ class AirPlayClient(
     /** RECORD：激活会话（接收端 onSessionActive）。路径用相对 `/`（catplay record() 同款）。 */
     fun record(): Boolean =
         try {
+            val control = socket
             val (statusLine, _) =
                 request(
                     "RECORD",
@@ -2821,6 +2854,10 @@ class AirPlayClient(
                     contentType = "application/x-apple-binary-plist",
                 )
             val ok = statusLine.contains("200")
+            if (ok) {
+                recorded = true
+                if (control?.isClosed == true) retireAfterControlLoss(control)
+            }
             log(if (ok) "AIRPLAY: ✓ RECORD 完成——会话已激活" else "AIRPLAY: RECORD 应答 [$statusLine]")
             ok
         } catch (error: IOException) {
@@ -2876,7 +2913,10 @@ class AirPlayClient(
                         )
                     ControlCipher(phoneReadKey, phoneWriteKey)
                 }
-            registerEventCommandChannel(socket, cipher)
+            if (!registerEventCommandChannel(socket, cipher)) {
+                socket.close()
+                return false
+            }
             Thread({
                 val input = socket.getInputStream()
                 val accumulator = RtspAccumulator()
@@ -3047,6 +3087,7 @@ class AirPlayClient(
     // ---- RTSP 请求 ----
 
     private fun ensureConnected(timeoutMillis: Int = 5_000): Boolean {
+        if (isRetired) return false
         if (socket?.isConnected == true && socket?.isClosed == false) return true
         // 快照端点与代数：连接期间主控可能换端点（0x4301 晚到），
         // 若用旧地址建好连接再被请求，会一直连错机器到本轮超时。
@@ -3078,8 +3119,8 @@ class AirPlayClient(
                     failures += "$host（解析失败：${error.message}）"
                     continue
                 }
+            val newSocket = Socket()
             try {
-                val newSocket = Socket()
                 newSocket.connect(InetSocketAddress(address, target.airPlayPort), timeoutMillis)
                 if (generation != endpointGeneration) {
                     // 连接途中端点已更新：丢弃这条旧连接，下一轮按新地址重连
@@ -3092,12 +3133,19 @@ class AirPlayClient(
                 // 2026-10-27 回退：控制通道保持「只做 TCP 连接、不加内核级超时」的原状
                 // （见事件通道同处注释）。音频 UDP 的 dataPort/controlPort 都是由这条通道
                 // 协商出来的，先排除 socket 级改动对音频通路建立的任何影响。
-                socket = newSocket
-                activeAddress = address
-                activeHost = addressLiteral(address)
+                synchronized(rtspWriteLock) {
+                    if (isRetired) {
+                        newSocket.close()
+                        return false
+                    }
+                    socket = newSocket
+                    activeAddress = address
+                    activeHost = addressLiteral(address)
+                }
                 log("AIRPLAY: TCP 已连通 $activeHost:${target.airPlayPort}（本机 ${newSocket.localAddress.hostAddress}）")
                 return true
             } catch (error: IOException) {
+                runCatching { newSocket.close() }
                 failures += "$host（${error.message}）"
             }
         }
@@ -3214,6 +3262,7 @@ class AirPlayClient(
         val queue = java.util.concurrent.LinkedBlockingQueue<Pair<String, ByteArray>>(1)
         val cseq: Int
         synchronized(rtspWriteLock) {
+            if (isRetired || socket !== client) throw IOException("控制通道已关闭")
             cseq = ++cSeq
             // 先登记再写：响应可能在 write 返回前就到达
             pendingResponses[cseq] = queue
@@ -3331,9 +3380,20 @@ class AirPlayClient(
         } finally {
             // 只由「当前」读线程清账：重连会换 socket 与新读线程，旧线程不得误伤新会话
             if (generation == readerGeneration) {
-                failAllPending("控制通道读线程结束")
+                if (onControlLost != null) runCatching { client.close() }
+                if (!retireAfterControlLoss(client)) {
+                    failAllPending("控制通道读线程结束")
+                }
             }
         }
+    }
+
+    private fun retireAfterControlLoss(client: Socket): Boolean {
+        val onLost = onControlLost ?: return false
+        if (!recorded || socket !== client || !retire()) return false
+        log("AIRPLAY: 已激活会话的控制通道断开，已停止旧请求")
+        onLost()
+        return true
     }
 
     /** 控制通道报文（CSeq 派发用；head 供诊断与请求/应答分类）。 */

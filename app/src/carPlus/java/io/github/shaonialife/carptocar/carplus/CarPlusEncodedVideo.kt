@@ -18,7 +18,7 @@ internal class CarPlusEncodedVideo(
     private val outputSize: CarPlusVideo.Size,
     private val allowOtherProfiles: Boolean,
     private val main: Handler,
-    private val onFailure: (CarPlusEncodedVideo, String) -> Unit,
+    private val onFailure: (CarPlusEncodedVideo, String, CarPlusVideo.AvcFormat?) -> Unit,
 ) {
     @Volatile private var cancelled = false
     @Volatile private var waitingForKeyFrame = false
@@ -51,6 +51,7 @@ internal class CarPlusEncodedVideo(
         var sps: ByteArray? = null
         var pps: ByteArray? = null
         var failure = "ICCOA 直通管道已关闭"
+        var incompatibleFormat: CarPlusVideo.AvcFormat? = null
         try {
             DataInputStream(BufferedInputStream(ParcelFileDescriptor.AutoCloseInputStream(input))).use { stream ->
                 while (!cancelled && sender.isRunning) {
@@ -69,16 +70,17 @@ internal class CarPlusEncodedVideo(
                     val newSps = units.firstOrNull { nalType(it) == 7 }
                     val newPps = units.firstOrNull { nalType(it) == 8 }
                     if (newSps != null && !newSps.contentEquals(sps)) {
-                        val dimensions = H264Sps.parseNal(newSps)
-                        val profile = newSps.getOrNull(1)?.toInt()?.and(0xff)
-                        if (dimensions != (outputSize.width to outputSize.height) ||
-                            profile == null || !allowOtherProfiles && profile != 66
-                        ) {
-                            throw IOException("源 H.264 档位不兼容（尺寸 $dimensions，profile $profile）")
+                        val dimensions = H264Sps.parseNal(newSps) ?: throw IOException("无法解析源 H.264 SPS")
+                        val format = CarPlusVideo.AvcFormat(
+                            CarPlusVideo.Size(dimensions.first, dimensions.second), newSps[1].toInt() and 0xff,
+                        )
+                        if (!format.canForwardTo(outputSize, allowOtherProfiles)) {
+                            incompatibleFormat = format
+                            throw IOException("源 H.264 档位不兼容（$format，目标 ${outputSize.width}×${outputSize.height}）")
                         }
                         sps = newSps
                         awaitKeyFrame()
-                        SessionController.appendLog("ICCOA: 源 H.264 SPS $dimensions profile=$profile")
+                        SessionController.appendLog("ICCOA: 源 H.264 SPS $format")
                     }
                     if (newPps != null && !newPps.contentEquals(pps)) {
                         pps = newPps
@@ -87,12 +89,12 @@ internal class CarPlusEncodedVideo(
                     val idr = units.any { nalType(it) == 5 }
                     if (waitingForKeyFrame && (!idr || sps == null || pps == null)) continue
                     if (units.none { nalType(it) in 1..5 }) continue
-                    val data = if (idr && sps != null && pps != null && (newSps == null || newPps == null)) {
-                        PREFIX + sps + PREFIX + pps + frame
+                    val nals = if (idr && sps != null && pps != null && (newSps == null || newPps == null)) {
+                        listOf(sps, pps) + units.filter { nalType(it) != 7 && nalType(it) != 8 }
                     } else {
-                        frame
+                        units
                     }
-                    if (sender.submitH264(data, idr, timestampUs / 1_000) && waitingForKeyFrame) {
+                    if (sender.submitH264Nals(nals, idr, timestampUs / 1_000) && waitingForKeyFrame) {
                         waitingForKeyFrame = false
                         main.removeCallbacks(timeout)
                         SessionController.appendLog("ICCOA: H.264 直通首个 IDR 已送达 CarPlay 视频通道")
@@ -104,7 +106,7 @@ internal class CarPlusEncodedVideo(
         } finally {
             main.removeCallbacks(timeout)
             if (!cancelled) main.post {
-                if (!cancelled) onFailure(this, timeoutReason ?: failure)
+                if (!cancelled) onFailure(this, timeoutReason ?: failure, incompatibleFormat)
             }
         }
     }
@@ -116,8 +118,4 @@ internal class CarPlusEncodedVideo(
     }
 
     private fun nalType(nal: ByteArray) = nal[0].toInt() and 0x1f
-
-    companion object {
-        private val PREFIX = byteArrayOf(0, 0, 0, 1)
-    }
 }
