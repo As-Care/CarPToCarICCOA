@@ -39,9 +39,14 @@ jobs:
       - name: Fetch APK from release branch
         run: |
           git fetch origin release:release
-          git checkout release -- CarPToCar+ICCOA.apk
-          cp CarPToCar+ICCOA.apk "CarPToCar+ICCOA-${{ steps.vars.outputs.version }}.apk"
-          ls -lh CarPToCar+ICCOA*.apk
+          TARGET_FILE="CarPToCar+ICCOA-${{ steps.vars.outputs.version }}.apk"
+          if git checkout release -- "$TARGET_FILE" 2>/dev/null; then
+            echo "Checked out $TARGET_FILE directly from release branch"
+          else
+            git checkout release -- CarPToCar+ICCOA.apk
+            cp CarPToCar+ICCOA.apk "$TARGET_FILE"
+          fi
+          ls -lh "$TARGET_FILE"
 
       - name: Publish GitHub Release
         uses: softprops/action-gh-release@v2
@@ -49,7 +54,6 @@ jobs:
           tag_name: ${{ steps.vars.outputs.tag }}
           name: "CarPToCar+ICCOA ${{ steps.vars.outputs.tag }}"
           files: |
-            CarPToCar+ICCOA.apk
             CarPToCar+ICCOA-${{ steps.vars.outputs.version }}.apk
           generate_release_notes: true
           draft: false
