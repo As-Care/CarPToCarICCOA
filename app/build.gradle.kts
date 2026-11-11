@@ -86,6 +86,9 @@ android {
         buildConfigField("boolean", "CAR_PLUS_AUDIO_RELAY", carPlusAudioRelay.toString())
         buildConfigField("boolean", "CAR_PLUS_VIDEO_RELAY", carPlusVideoRelay.toString())
         if (carPlus) manifestPlaceholders["carPlusRuntime"] = carPlusRuntime.toString()
+        ndk {
+            abiFilters += listOf("arm64-v8a")
+        }
     }
 
     signingConfigs {
@@ -134,7 +137,18 @@ android {
         sourceSets["androidTest"].assets.srcDir("src/carPlusTest/assets")
         defaultConfig.testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
-    if (carPlus && carPlusSdkDex != null) packaging.jniLibs.useLegacyPackaging = true
+    packaging {
+        if (carPlus && carPlusSdkDex != null) jniLibs.useLegacyPackaging = true
+        resources {
+            excludes += listOf(
+                "org/bouncycastle/pqc/**",
+                "org/bouncycastle/x509/**",
+                "META-INF/versions/**",
+                "META-INF/INDEX.LIST",
+                "META-INF/*.version"
+            )
+        }
+    }
 
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_17

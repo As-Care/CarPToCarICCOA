@@ -1,0 +1,58 @@
+name: Release APK
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      tag_name:
+        description: 'Tag name to release (e.g. v1.2.53)'
+        required: false
+        default: ''
+
+permissions:
+  contents: write
+
+jobs:
+  publish-release:
+    name: Publish Release with APK
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Determine Tag Name
+        id: vars
+        run: |
+          if [ -n "${{ github.event.inputs.tag_name }}" ]; then
+            TAG="${{ github.event.inputs.tag_name }}"
+          else
+            TAG="${GITHUB_REF#refs/tags/}"
+          fi
+          echo "tag=$TAG" >> $GITHUB_OUTPUT
+          CLEAN_VERSION="${TAG#v}"
+          echo "version=$CLEAN_VERSION" >> $GITHUB_OUTPUT
+
+      - name: Fetch APK from release branch
+        run: |
+          git fetch origin release:release
+          git checkout release -- CarPToCar+ICCOA.apk
+          cp CarPToCar+ICCOA.apk "CarPToCar+ICCOA-${{ steps.vars.outputs.version }}.apk"
+          ls -lh CarPToCar+ICCOA*.apk
+
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.vars.outputs.tag }}
+          name: "CarPToCar+ICCOA ${{ steps.vars.outputs.tag }}"
+          files: |
+            CarPToCar+ICCOA.apk
+            CarPToCar+ICCOA-${{ steps.vars.outputs.version }}.apk
+          generate_release_notes: true
+          draft: false
+          prerelease: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
