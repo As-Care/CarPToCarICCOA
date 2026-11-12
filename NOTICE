@@ -11,6 +11,12 @@ does not apply to them.
 --------------------------------------------------------------------------------
 0. Provenance — reference works
 --------------------------------------------------------------------------------
+  CarPToCarL — https://github.com/jjuugk/CarPToCarL
+  Released under the MIT License.
+  CarPToCar+ICCOA is forked and developed from CarPToCarL. The upstream
+  CarPToCarL project focuses on CarLife protocol conversion, whereas this
+  project is refactored to support ICCOA (ColorOS Car+) protocol.
+
   CarDeck — https://github.com/shaonialife/cardeck
   Copyright (c) 2026 lizhihua, released under the MIT License.
 
