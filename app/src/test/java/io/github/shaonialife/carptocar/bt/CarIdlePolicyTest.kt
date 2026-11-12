@@ -1,9 +1,38 @@
 package io.github.shaonialife.carptocar.bt
 
+import android.content.Intent
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
+import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class CarIdlePolicyTest {
+    private fun reconnectOnOpen(
+        action: String = Intent.ACTION_MAIN,
+        flags: Int = Intent.FLAG_ACTIVITY_NEW_TASK,
+        restoringActivity: Boolean = false,
+        autoConnectEnabled: Boolean = true,
+    ) = CarIdlePolicy.shouldReconnectAfterLauncherOpen(
+        action, setOf(Intent.CATEGORY_LAUNCHER), flags, restoringActivity, autoConnectEnabled,
+    )
+
+    @Test
+    fun `离车后从桌面重新启动可发起连接`() {
+        assertTrue(reconnectOnOpen())
+    }
+
+    @Test
+    fun `恢复离车前的任务仍保留离线状态`() {
+        assertFalse(reconnectOnOpen(restoringActivity = true))
+        assertFalse(reconnectOnOpen(flags = Intent.FLAG_ACTIVITY_LAUNCHED_FROM_HISTORY))
+    }
+
+    @Test
+    fun `桌面启动遵从自动连接开关`() {
+        assertFalse(reconnectOnOpen(autoConnectEnabled = false))
+        assertFalse(reconnectOnOpen(action = Intent.ACTION_VIEW))
+    }
+
     private fun verdict(
         aclConnected: Boolean = false,
         disconnectedForMillis: Long = CarIdlePolicy.IDLE_TIMEOUT_MILLIS,

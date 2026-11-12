@@ -45,6 +45,7 @@ import io.github.shaonialife.carptocar.bt.BtProfiles
 import io.github.shaonialife.carptocar.bt.CarApproachPrefs
 import io.github.shaonialife.carptocar.bt.CarApproachReceiver
 import io.github.shaonialife.carptocar.bt.CarIdleGuard
+import io.github.shaonialife.carptocar.bt.CarIdlePolicy
 import io.github.shaonialife.carptocar.bt.TargetDevicePrefs
 import io.github.shaonialife.carptocar.carlife.CarLifeHijack
 import io.github.shaonialife.carptocar.carplus.CarPlusReceiver
@@ -372,6 +373,23 @@ class MainActivity : AppCompatActivity() {
         autoConnectRequested = false
         log("AUTOCONNECT: 打开 App 即自动发起连接（可在「连接准备」里关闭）")
         proceedToConnect { ensureBluetoothReady { startConnectionNow() } }
+    }
+
+    private fun rearmAfterDeparture(launch: Intent?, restoringActivity: Boolean = false): Boolean {
+        if (!SessionController.isCarOffline || launch == null) return false
+        if (!CarIdlePolicy.shouldReconnectAfterLauncherOpen(
+                action = launch.action,
+                categories = launch.categories,
+                flags = launch.flags,
+                restoringActivity = restoringActivity,
+                autoConnectEnabled = AutoConnectPrefs.enabled(this),
+            )
+        ) return false
+        CarIdleGuard.cancel(this)
+        CarApproachPrefs.setOfflineCarAddress(this, null)
+        carPlusStartupAttempted = false
+        log("AUTOCONNECT: 用户从桌面打开 App，重新发起车机连接")
+        return true
     }
 
     /**
@@ -993,6 +1011,7 @@ class MainActivity : AppCompatActivity() {
         // maybeAutoConnect，所以真正的发起时机以自检完成为准，这里只是起步。
         val launchedByApproach = intent?.getBooleanExtra(EXTRA_CAR_APPROACH, false) == true
         val silentApproach = launchedByApproach && CarApproachPrefs.silentUi(this)
+        if (!launchedByApproach) rearmAfterDeparture(intent, restoringActivity = savedInstanceState != null)
         // 用户**自己**点开了 App = 明确想用：立刻解除「刚断开过」的抑制。
         // 否则在车上（蓝牙一直连着，不会再收到 ACL_DISCONNECTED）关掉 App 之后，
         // 抑制会一直挂着，之后的抖动/车机重启都唤不醒它（2026-10-30 用户要求：
@@ -3123,8 +3142,7 @@ class MainActivity : AppCompatActivity() {
     }
 
     /**
-     * App 已在后台/前台时又被「靠近车机」拉起（singleTask + SINGLE_TOP）：
-     * 不重建界面，只重新武装一次自动连接。已在连接或已连上时 [maybeAutoConnect] 自己会跳过。
+     * 复用界面时，车机靠近事件或离车后点桌面图标都可以发起新一轮连接。
      */
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
@@ -3135,10 +3153,13 @@ class MainActivity : AppCompatActivity() {
             (getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager)
                 .cancel(CarApproachReceiver.BLOCKED_NOTIFICATION_ID)
         }
-        if (!intent.getBooleanExtra(EXTRA_CAR_APPROACH, false)) return
-        intent.removeExtra(EXTRA_CAR_APPROACH)
         if (isFinishing || isDestroyed) return
-        log("APPROACH: 检测到目标车机蓝牙靠近（App 已在运行）——由前台重新发起连接")
+        if (intent.getBooleanExtra(EXTRA_CAR_APPROACH, false)) {
+            intent.removeExtra(EXTRA_CAR_APPROACH)
+            log("APPROACH: 检测到目标车机蓝牙靠近（App 已在运行）——由前台重新发起连接")
+        } else if (!rearmAfterDeparture(intent)) {
+            return
+        }
         autoConnectRequested = true
         // App 已在后台运行过：启动自检那一轮早就跑完，不必再为它让路。
         // 只留一个极短延迟，让 onResume 先把窗口恢复到前台（权限弹窗需要已恢复的 Activity）。

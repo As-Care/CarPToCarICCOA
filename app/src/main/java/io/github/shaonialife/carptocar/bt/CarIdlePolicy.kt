@@ -1,5 +1,7 @@
 package io.github.shaonialife.carptocar.bt
 
+import android.content.Intent
+
 /**
  * 「车机走远了，该不该收摊」的判定（2026-10-30）。
  *
@@ -18,6 +20,17 @@ package io.github.shaonialife.carptocar.bt
 object CarIdlePolicy {
     /** 蓝牙断开后等这么久再收摊。 */
     const val IDLE_TIMEOUT_MILLIS = 30_000L
+
+    internal fun shouldReconnectAfterLauncherOpen(
+        action: String?,
+        categories: Set<String>?,
+        flags: Int,
+        restoringActivity: Boolean,
+        autoConnectEnabled: Boolean,
+    ): Boolean =
+        autoConnectEnabled && !restoringActivity &&
+            action == Intent.ACTION_MAIN && categories?.contains(Intent.CATEGORY_LAUNCHER) == true &&
+            flags and Intent.FLAG_ACTIVITY_LAUNCHED_FROM_HISTORY == 0
 
     enum class Verdict {
         STOP_SESSION,
