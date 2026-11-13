@@ -10,7 +10,7 @@
         <item name="android:navigationBarColor">#000000</item>
         <item name="android:windowLightStatusBar">false</item>
         <item name="android:windowLightNavigationBar">false</item>
-        <item name="android:colorBackground">#101418</item>
+        <item name="android:colorBackground">#111E2E</item>
     </style>
 
     <!-- 车机桌面（dock/网格）：窗口透明——壁纸由 GL 合成器画在最底层，

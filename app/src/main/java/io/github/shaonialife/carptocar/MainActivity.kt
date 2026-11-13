@@ -1547,7 +1547,7 @@ class MainActivity : AppCompatActivity() {
         hubPlate.background.mutate().setTint(plateColor)
         hubCar.setColorFilter(carColor)
         hubCaption.setTextColor(
-            if (s == HeroState.IDLE) getColor(R.color.m3_mono_dim) else 0xFF5C8B96.toInt(),
+            if (s == HeroState.IDLE) getColor(R.color.m3_mono_dim) else getColor(R.color.m3_primary),
         )
 
         hubBlink?.cancel()

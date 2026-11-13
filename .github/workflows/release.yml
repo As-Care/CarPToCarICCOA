@@ -55,6 +55,7 @@ jobs:
           name: "CarPToCar+ICCOA ${{ steps.vars.outputs.tag }}"
           files: |
             CarPToCar+ICCOA-${{ steps.vars.outputs.version }}.apk
+          body_path: RELEASE_NOTES.md
           generate_release_notes: true
           draft: false
           prerelease: false

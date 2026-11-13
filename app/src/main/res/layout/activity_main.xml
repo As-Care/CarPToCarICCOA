@@ -37,7 +37,7 @@
                         android:layout_width="wrap_content"
                         android:layout_height="wrap_content"
                         android:text="@string/app_name"
-                        android:textColor="#EDF3F3"
+                        android:textColor="@color/m3_on_surface"
                         android:textSize="21sp"
                         android:textStyle="bold" />
 
@@ -49,7 +49,7 @@
                         android:drawableStart="@drawable/ic_dot_small"
                         android:drawablePadding="5dp"
                         android:gravity="center_vertical"
-                        android:textColor="#7C8B8B"
+                        android:textColor="@color/m3_on_var"
                         android:textSize="11.5sp"
                         android:text="设备检测中" />
 
@@ -58,7 +58,7 @@
                         android:layout_width="match_parent"
                         android:layout_height="wrap_content"
                         android:layout_marginTop="4dp"
-                        android:textColor="#FFD9A441"
+                        android:textColor="@color/m3_amber"
                         android:textSize="11.5sp"
                         android:text="@string/local_video_source_idle" />
                 </LinearLayout>
@@ -165,7 +165,7 @@
                         android:includeFontPadding="false"
                         android:letterSpacing="0.22"
                         android:text="@string/app_wordmark"
-                        android:textColor="#5C6B6B"
+                        android:textColor="@color/m3_mono_dim"
                         android:textSize="10sp"
                         android:textStyle="bold" />
                 </FrameLayout>
@@ -183,7 +183,7 @@
                         android:layout_width="wrap_content"
                         android:layout_height="wrap_content"
                         android:text="未连接"
-                        android:textColor="#EDF4F4"
+                        android:textColor="@color/m3_on_surface"
                         android:textSize="25sp"
                         android:textStyle="bold" />
 

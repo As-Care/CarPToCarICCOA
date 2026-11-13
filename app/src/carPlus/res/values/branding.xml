@@ -3,5 +3,5 @@
     <string name="app_name">CarPToCar+ICCOA</string>
     <string name="app_wordmark">CarPTo\nCar+ICCOA</string>
     <string name="display_card_subtitle">分辨率 · 帧率</string>
-    <color name="ic_launcher_background">#102637</color>
+    <color name="ic_launcher_background">#0C1722</color>
 </resources>
