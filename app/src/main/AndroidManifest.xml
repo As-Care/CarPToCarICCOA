@@ -25,23 +25,10 @@
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_CONNECTED_DEVICE" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
     <uses-permission android:name="android.permission.WAKE_LOCK" />
-    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PROJECTION" />
-    <!-- 音频通道：AudioPlaybackCapture（捕获本机媒体/导航声音上车）必需 -->
-    <uses-permission android:name="android.permission.RECORD_AUDIO" />
     <!-- 音频通道激活时静音手机媒体音量（声音只从车机出），断开恢复 -->
     <uses-permission android:name="android.permission.MODIFY_AUDIO_SETTINGS" />
     <!-- 暗幕（替代息屏）需要；系统「显示在其他应用上层」列表只收录声明本权限的应用 -->
     <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />
-    <!--
-     CarLife 画质增强：手机端 CarLife 引擎从 **/sdcard 根下** 的 BaiduCarlife 目录读
-     调试配置，这不是 App 私有目录，分区存储下只有 MANAGE_EXTERNAL_STORAGE 能写。
-
-     **必须在清单声明**：缺了这条，系统设置里根本不会出现「所有文件访问」开关，
-     `appops set` 也会失效（`isExternalStorageManager()` 恒 false），功能必然静默失效。
-     本 App 为自用车机工具，不分发到 Play，不受其「所有文件访问」政策限制。
-    -->
-    <uses-permission android:name="android.permission.MANAGE_EXTERNAL_STORAGE" />
-
     <!-- 靠近车机自动启动：靠系统投递蓝牙 ACL 广播唤醒进程。电池优化一开，
          后台进程被冻结/广播被丢弃，功能会表现为「有时连、有时没反应」，
          故需要引导用户把本应用加入「不限制」名单（App 内只在开启开关时提示一次）。
@@ -87,12 +74,12 @@
         </activity>
 
         <!-- 车机设置模块已移除（2026-10-24）：手机侧二级菜单与车机双栏设置页均已删除，
-             「显示」面板内容（分辨率缩放/帧率/触摸节流/CarLife 劫持开关）已迁移到首页。 -->
+             「显示」面板内容已迁移到首页。 -->
 
         <service
             android:name=".service.CarPlayService"
             android:exported="false"
-            android:foregroundServiceType="connectedDevice|mediaProjection" />
+            android:foregroundServiceType="connectedDevice" />
 
         <!-- 通知栏「断开」：后台自动连接时界面上没有窗口，断开的入口必须独立于
              界面存活，所以走广播。exported=false 即可——PendingIntent 由本应用创建，

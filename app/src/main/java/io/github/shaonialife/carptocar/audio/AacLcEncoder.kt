@@ -96,69 +96,6 @@ class AacLcEncoder(
                 else -> 4
             }
 
-        /**
-         * 自检：用平台解码器把一帧裸 AAC 解回 PCM，返回 `(峰值, 样本数)`；解不出返回 null。
-         *
-         * 为什么需要（2026-10-20 第三次实测）：车机「收包但不发声」时，最容易搞错的是
-         * 归因——是编码器吐了坏流/静音，还是车机侧没播。本机解码一遍就能证伪：
-         * 峰值 > 0 说明比特流有效且非静音，问题必在车机侧；峰值 = 0 说明编码器在出静音。
-         *
-         * 注意：这里**绝不能**对帧做任何字节换序（旧实现把所有负载统一按大端 s16 换序，
-         * 连 AAC 比特流也换掉了——车机解码器直接判坏帧，这就是「有包无声」的根因）。
-         */
-        fun decodePeak(
-            frame: ByteArray,
-            sampleRate: Int,
-            channels: Int,
-        ): Pair<Int, Int>? {
-            var created: MediaCodec? = null
-            try {
-                val format = MediaFormat.createAudioFormat(MIME, sampleRate, channels)
-                val codec = MediaCodec.createDecoderByType(MIME)
-                created = codec
-                codec.configure(format, null, null, 0)
-                codec.start()
-                val inputIndex = codec.dequeueInputBuffer(200_000L)
-                if (inputIndex < 0) return null
-                val input = codec.getInputBuffer(inputIndex) ?: return null
-                input.clear()
-                input.put(frame)
-                codec.queueInputBuffer(inputIndex, 0, frame.size, 0L, 0)
-                val info = MediaCodec.BufferInfo()
-                val deadline = System.nanoTime() + 600_000_000L
-                while (System.nanoTime() < deadline) {
-                    val outputIndex = codec.dequeueOutputBuffer(info, 60_000L)
-                    if (outputIndex == MediaCodec.INFO_TRY_AGAIN_LATER ||
-                        outputIndex == MediaCodec.INFO_OUTPUT_FORMAT_CHANGED ||
-                        outputIndex == MediaCodec.INFO_OUTPUT_BUFFERS_CHANGED
-                    ) {
-                        continue
-                    }
-                    if (outputIndex < 0) continue
-                    val output = codec.getOutputBuffer(outputIndex)
-                    var peak = 0
-                    var samples = 0
-                    if (output != null && info.size > 0) {
-                        output.position(info.offset)
-                        output.limit(info.offset + info.size)
-                        while (output.remaining() >= 2) {
-                            val value = output.short.toInt()
-                            val magnitude = if (value < 0) -value else value
-                            if (magnitude > peak) peak = magnitude
-                            samples++
-                        }
-                    }
-                    codec.releaseOutputBuffer(outputIndex, false)
-                    if (samples > 0) return peak to samples
-                }
-                return null
-            } catch (_: Exception) {
-                return null
-            } finally {
-                runCatching { created?.stop() }
-                runCatching { created?.release() }
-            }
-        }
     }
 
     private var codec: MediaCodec? = null

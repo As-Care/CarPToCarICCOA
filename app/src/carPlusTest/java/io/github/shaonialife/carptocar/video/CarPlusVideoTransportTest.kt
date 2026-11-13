@@ -3,6 +3,9 @@ package io.github.shaonialife.carptocar.video
 import android.media.MediaCodec
 import android.media.MediaExtractor
 import android.media.MediaFormat
+import android.os.Handler
+import android.os.Looper
+import android.os.ParcelFileDescriptor
 import android.os.SystemClock
 import android.util.Log
 import android.view.Surface
@@ -10,15 +13,17 @@ import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
 import io.github.shaonialife.carptocar.airplay.AirPlayCrypto
 import io.github.shaonialife.carptocar.airplay.StreamFrameCipher
-import io.github.shaonialife.carptocar.carlife.H264Sps
+import io.github.shaonialife.carptocar.carplus.CarPlusEncodedVideo
 import io.github.shaonialife.carptocar.carplus.CarPlusSurfaceScaler
 import io.github.shaonialife.carptocar.carplus.CarPlusVideo
 import java.io.DataInputStream
+import java.io.DataOutputStream
 import java.net.InetAddress
 import java.net.ServerSocket
 import java.net.Socket
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
+import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -26,6 +31,71 @@ import org.junit.runner.RunWith
 
 @RunWith(AndroidJUnit4::class)
 class CarPlusVideoTransportTest {
+    @Test
+    fun iccoaEncodedFramesReachCarPlayWithoutReencoding() {
+        val address = InetAddress.getByName("127.0.0.1")
+        val key = ByteArray(32) { it.toByte() }
+        val size = CarPlusVideo.defaultSize
+        val extractor = MediaExtractor()
+        try {
+            openSample(extractor)
+            val format = extractor.getTrackFormat(0)
+            val csd = (0..1).map { index ->
+                checkNotNull(format.getByteBuffer("csd-$index")).let { data ->
+                    ByteArray(data.remaining()).also { data.get(it) }
+                }
+            }
+            ServerSocket(0, 1, address).use { receiver ->
+                receiver.soTimeout = 5_000
+                val sender = VideoSender(
+                    host = address.hostAddress!!,
+                    dataPort = receiver.localPort,
+                    frameCipher = StreamFrameCipher.ChaCha(key),
+                    width = size.width,
+                    height = size.height,
+                    log = { Log.i("CarPlusTransportTest", it) },
+                    canvasSize = { 1412 to 654 },
+                )
+                try {
+                    assertTrue(sender.startPassthrough(strictKeyFrames = true))
+                    receiver.accept().use { socket ->
+                        socket.soTimeout = 5_000
+                        val (input, output) = ParcelFileDescriptor.createSocketPair()
+                        val video = CarPlusEncodedVideo(input, sender, size, true, Handler(Looper.getMainLooper())) { _, reason, _ ->
+                            Log.e("CarPlusTransportTest", reason)
+                        }
+                        try {
+                            video.start()
+                            DataOutputStream(ParcelFileDescriptor.AutoCloseOutputStream(output)).use { stream ->
+                                stream.writeInt(0)
+                                val buffer = ByteBuffer.allocate(1_000_000)
+                                val expectedFrames = List(3) { index ->
+                                    buffer.clear()
+                                    val count = extractor.readSampleData(buffer, 0)
+                                    assertTrue("Missing H.264 sample", count > 0)
+                                    val bytes = ByteArray(count).also { buffer.get(it) }
+                                    val frame = if (index == 0) csd[0] + csd[1] + bytes else bytes
+                                    stream.writeInt(frame.size)
+                                    stream.writeLong(extractor.sampleTime)
+                                    stream.write(frame)
+                                    extractor.advance()
+                                    sender.splitAnnexB(frame)
+                                }
+                                verifyStream(socket, key, size.width, size.height, sender, expectedFrames)
+                            }
+                        } finally {
+                            video.close()
+                        }
+                    }
+                } finally {
+                    sender.stop()
+                }
+            }
+        } finally {
+            extractor.release()
+        }
+    }
+
     @Test
     fun decodedSampleReachesCarPlaySocketAsH264() {
         assertEncodedSize(CarPlusVideo.WIDTH, CarPlusVideo.HEIGHT)
@@ -73,7 +143,14 @@ class CarPlusVideoTransportTest {
         }
     }
 
-    private fun verifyStream(socket: Socket, key: ByteArray, width: Int, height: Int, sender: VideoSender) {
+    private fun verifyStream(
+        socket: Socket,
+        key: ByteArray,
+        width: Int,
+        height: Int,
+        sender: VideoSender,
+        expectedFrames: List<List<ByteArray>>? = null,
+    ) {
         val input = DataInputStream(socket.getInputStream())
         var receivedConfig = false
         var frameCount = 0L
@@ -103,6 +180,15 @@ class CarPlusVideoTransportTest {
                     )
                     val length = nal.int
                     assertTrue("Invalid H.264 NAL length: $length", length in 1..nal.remaining())
+                    expectedFrames?.get(frameCount.toInt())?.let { expected ->
+                        assertEquals(expected[0].size, length)
+                        assertArrayEquals(expected[0], ByteArray(length).also { nal.get(it) })
+                        for (unit in expected.drop(1)) {
+                            assertEquals(unit.size, nal.int)
+                            assertArrayEquals(unit, ByteArray(unit.size).also { nal.get(it) })
+                        }
+                        assertEquals(0, nal.remaining())
+                    }
                     frameCount++
                 }
             }
@@ -114,11 +200,7 @@ class CarPlusVideoTransportTest {
     private fun renderSample(surface: Surface) {
         val extractor = MediaExtractor()
         try {
-            val assets = InstrumentationRegistry.getInstrumentation().context.assets
-            assets.openFd("carplus-sample.mp4").use { sample ->
-                extractor.setDataSource(sample.fileDescriptor, sample.startOffset, sample.length)
-            }
-            extractor.selectTrack(0)
+            openSample(extractor)
             val format = extractor.getTrackFormat(0)
             val decoder = MediaCodec.createDecoderByType(MediaFormat.MIMETYPE_VIDEO_AVC)
             try {
@@ -154,5 +236,13 @@ class CarPlusVideoTransportTest {
         } finally {
             extractor.release()
         }
+    }
+
+    private fun openSample(extractor: MediaExtractor) {
+        val assets = InstrumentationRegistry.getInstrumentation().context.assets
+        assets.openFd("carplus-sample.mp4").use { sample ->
+            extractor.setDataSource(sample.fileDescriptor, sample.startOffset, sample.length)
+        }
+        extractor.selectTrack(0)
     }
 }

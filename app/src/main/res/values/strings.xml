@@ -15,8 +15,7 @@
          那属于描述性引用。详见仓库根目录 DISCLAIMER.md 与 README「非官方声明」。 -->
     <string name="app_name">CarPToCar+ICCOA</string>
     <string name="app_wordmark">CarPTo\nCar+ICCOA</string>
-    <string name="local_video_source_title">本地 CarLife 劫持</string>
-    <string name="local_video_source_idle">CarLife+ 未启动</string>
+    <string name="local_video_source_idle">正在准备 ICCOA Car+ 接收端</string>
     <string name="app_subtitle">非官方实验性 CarPlay 兼容发送端</string>
     <string name="accessibility_description">镜像模式：把车机触摸手势注入手机屏幕，不读取屏幕内容</string>
     <string name="carplus_frame_rate">投屏帧率</string>

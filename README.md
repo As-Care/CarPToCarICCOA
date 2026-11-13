@@ -83,7 +83,7 @@ ICCOA 真机测试包需要 JDK 17、Gradle 8.10.2、Android SDK 36、Build-Tool
 仓库的 Gradle Wrapper 和 JDK 默认配置指向原开发机的 Windows 路径。在 Mac 或其他环境上，用 `local.properties` 配置 `sdk.dir`，将 `GRADLE` 指向本机 Gradle 8.10.2 的可执行文件，`JAVA_HOME` 指向 JDK 17，`RUNTIME` 和 `RELAY_ASSETS` 指向已准备的运行时和转发组件目录。从仓库根目录运行：
 
 ```sh
-"$GRADLE" -Dorg.gradle.java.home="$JAVA_HOME" -PcarPlus=true \
+"$GRADLE" -Dorg.gradle.java.home="$JAVA_HOME" \
   -PcarPlusSdkStubs="$RUNTIME/../icar-sdk-stubs.jar" \
   -PcarPlusSdkDex="$RUNTIME/icar-sdk.dex" \
   -PcarPlusSdkAssets="$RUNTIME/assets" \
@@ -120,7 +120,7 @@ adb shell am start -n io.github.shaonialife.carptocar.carplus/io.github.shaonial
 
 源码以 [MIT 许可证](LICENSE) 发布。
 
-- 本项目基于开源项目 [CarPToCarL](https://github.com/jjuugk/CarPToCarL) 进行二次开发。原项目支持的是 CarLife 协议转换，本项目在此基础上进行了重构与适配，重点支持 ICCOA 智慧车联（系统 Car+）协议。
+- 本项目基于开源项目 [CarPToCarL](https://github.com/jjuugk/CarPToCarL) 进行二次开发。本项目支持 ICCOA 智慧车联（系统 Car+）。
 - 基础的 iAP2、AirPlay、蓝牙链路及工程骨架最初参考了独立项目 [CarDeck](https://github.com/shaonialife/cardeck)，版权与第三方声明见 [NOTICE](NOTICE)。
 
 CarPlay、AirPlay、ICCOA、ColorOS 等名称归各自权利人所有，本文引用这些名称是为了说明兼容目标。使用条件和测试范围见 [免责声明](DISCLAIMER.md)。

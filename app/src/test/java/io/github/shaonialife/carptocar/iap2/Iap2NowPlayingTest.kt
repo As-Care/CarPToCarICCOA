@@ -26,7 +26,7 @@ class Iap2NowPlayingTest {
             durationMs = 240_000,
             status = Iap2NowPlaying.STATUS_PLAYING,
             elapsedMs = 12_345,
-            appName = "CarLife+",
+            appName = "Sample Player",
         )
 
     /** 从 body 里取出 media item 组（顶层 param 0x0000）的子参数，按 id 索引。 */
@@ -92,7 +92,7 @@ class Iap2NowPlayingTest {
         val top = Iap2Csm.parseParams(body).associateBy { it.id }
         val playback = Iap2Csm.parseParams(top.getValue(1).value).associateBy { it.id }
         assertEquals(1, playback.getValue(0x0000).value[0].toInt()) // STATUS_PLAYING
-        assertEquals("CarLife+", playback.getValue(0x0007).text())
+        assertEquals("Sample Player", playback.getValue(0x0007).text())
     }
 
     @Test

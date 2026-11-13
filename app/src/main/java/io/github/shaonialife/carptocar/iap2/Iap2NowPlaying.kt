@@ -26,7 +26,7 @@ package io.github.shaonialife.carptocar.iap2
  * 正确 ID 是 `0x0006`。本项目不发封面，因此 0x001A 一律不写（写了等于向车机
  * 声明一个并不存在的 artwork 传输）。
  *
- * 数据源可以是 CarLife 内置播放器经 0x10035 推来的媒体信息，或系统媒体会话
+ * 数据来自系统媒体会话
  * （MediaSessionsState）——由各链路的 provider 决定。
  */
 data class CarPlayNowPlaying(

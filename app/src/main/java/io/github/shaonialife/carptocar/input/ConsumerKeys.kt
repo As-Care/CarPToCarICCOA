@@ -150,9 +150,7 @@ object ConsumerKeys {
             PLAY_PAUSE -> KeyEvent.KEYCODE_MEDIA_PLAY_PAUSE
             MUTE -> KeyEvent.KEYCODE_VOLUME_MUTE
             // 0xCF = Consumer「Voice Command」：方向盘语音键在 CarPlay 里的标准用法。
-            // 转成 VOICE_ASSIST 只是为了让上层有一个统一的「语音键」标识——它不会拿去
-            // 注入系统（本机没有 Siri），而是由 SessionController 转成 CarLife 的
-            // 0x68008 KEYCODE_VR_START（见 CarLifeProtocol.HardKey）。
+            // 保留语音键标识，供上层和媒体播放键区分。
             0xCF -> KeyEvent.KEYCODE_VOICE_ASSIST
             else -> 0
         }

@@ -1084,7 +1084,7 @@ class AirPlayClient(
             )
         }
         // 车机分辨率：`displays[].widthPixels/heightPixels`。宽容解析见 CarDisplayGeometry——
-        // 这里一旦静默落空，整条链路（流画布 / 虚拟屏 / CarLife 98311 / 触摸映射）就全部
+        // 这里一旦静默落空，整条链路（视频画布与触摸映射）就全部
         // 按手机分辨率跑，画面比例当场错，所以成功与失败都必须落一条日志。
         val carDisplay = selected?.let(CarDisplayGeometry::sizeOf)
         val fallbackDisplay = phoneFallbackSize()
@@ -1741,18 +1741,8 @@ class AirPlayClient(
     var onMediaKey: ((Int) -> Unit)? = null
 
     /**
-     * 车机 HID 报告「全松开」时本次释放的 usage 集合（1.2.22）。
-     *
-     * 由 [VirtualIap2Link] 在状态式报告的下跳沿给出，SessionController 据此判断是否
-     * 需要给语音键补 `KEYCODE_VR_STOP`（仅长按时）。
-     */
-    var onHidKeysReleased: ((Set<Int>) -> Unit)? = null
-
-
-    /**
      * 「正在播放」信息提供者（歌名/歌手/专辑/播放状态），供虚拟 iAP2 链路的 0x5001
-     * NowPlayingUpdate 使用。由 SessionController 在会话建立时注入（数据源 = CarLife
-     * 内置播放器经 0x10035 推来的歌名）。null = 始终发空态。
+     * NowPlayingUpdate 使用，数据来自系统媒体会话。null = 始终发空态。
      */
     var nowPlayingSource: (() -> CarPlayNowPlaying?)? = null
 
@@ -1779,7 +1769,6 @@ class AirPlayClient(
                     callStateProvider = { callStateSource?.invoke() ?: 0 },
                 ).also {
                     it.onMediaKey = { keyCode -> onMediaKey?.invoke(keyCode) }
-                    it.onHidKeysReleased = { usages -> onHidKeysReleased?.invoke(usages) }
                     it.begin()
                     iapLink = it
                 }
@@ -2489,7 +2478,7 @@ class AirPlayClient(
         // （真 iPhone 媒体音频走这条）。往 100 推 PCM 的表现为：SETUP 回 200、给 dataPort、
         // 但 controlPort=0、/feedback 里 sampleTime 恒 0，约 6.5s 后整条会话被拆。
         val aac = mutableListOf<AudioProfile>()
-        // 音频档位优先 48K AAC：CarLife 恒输出 48K PCM（MAX_RATE=48000），若选 44.1K AAC
+        // 音频档位优先 48K AAC：ICCOA 媒体转发使用 48K PCM，若选 44.1K AAC
         // 会被迫做一次 48K→44.1K 重采样，双晶振时钟域漂移在播放数分钟后累计成卡顿
         // （Audi Q4 3873 实车稳定复现：music 3~5 分钟开始逐渐卡顿）。把 48K 排前面，
         // 绝大多数同时声明两种 AAC 的车机直接走零重采样通路。

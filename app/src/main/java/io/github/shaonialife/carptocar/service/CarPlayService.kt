@@ -16,7 +16,6 @@ import io.github.shaonialife.carptocar.MainActivity
 import io.github.shaonialife.carptocar.R
 import io.github.shaonialife.carptocar.SessionController
 import io.github.shaonialife.carptocar.bt.CarIdleGuard
-import io.github.shaonialife.carptocar.util.DebugFileLog
 
 /**
  * 前台保活服务：连接建立期间以 connectedDevice 类型常驻，
@@ -118,10 +117,6 @@ class CarPlayService : Service() {
         flags: Int,
         startId: Int,
     ): Int {
-        // 必须显式指定类型为 connectedDevice：
-        // 2 参 startForeground 会拾取 manifest 声明的全部类型（含 mediaProjection），
-        // 而 Android 14 启动 mediaProjection 类型要求 AppOps PROJECT_MEDIA（用户当次授权才有效）——
-        // 重启/授权过期后直接 SecurityException 崩溃（2026-10-09 实测踩坑）。
         androidx.core.app.ServiceCompat.startForeground(
             this,
             NOTIFICATION_ID,
@@ -136,13 +131,6 @@ class CarPlayService : Service() {
         uiHandler.removeCallbacks(freezeTick)
         freezeWatch.reset()
         uiHandler.postDelayed(freezeTick, FreezeWatch.DEFAULT_TICK_MS)
-        // 授权结果在（用户刚确认投屏）时：升级前台类型再创建投影（try/catch 兜底不崩）
-        if (pendingProjectionResult != null) {
-            upgradeToProjection()
-            takeProjection()
-        } else if (mediaProjection != null) {
-            upgradeToProjection()
-        }
         return START_STICKY
     }
 
@@ -165,68 +153,12 @@ class CarPlayService : Service() {
         super.onTaskRemoved(rootIntent)
     }
 
-    private fun takeProjection() {
-        val (code, data) = pendingProjectionResult ?: return
-        pendingProjectionResult = null
-        try {
-            val manager =
-                getSystemService(Context.MEDIA_PROJECTION_SERVICE) as android.media.projection.MediaProjectionManager
-            val projection = manager.getMediaProjection(code, data)
-            // Android 14+：createVirtualDisplay 前必须注册回调（资源管理强制）
-            projection?.registerCallback(
-                object : android.media.projection.MediaProjection.Callback() {
-                    override fun onStop() {
-                        mediaProjection = null
-                        // 关键诊断：授权丢失会导致音频/镜像不可用（此前只写 logcat，HKS 加密看不到）
-                        fileLog("SVC: MediaProjection 被系统停止（onStop）——音频/镜像需重新授权")
-                    }
-                },
-                android.os.Handler(android.os.Looper.getMainLooper()),
-            )
-            mediaProjection = projection
-            if (projection != null) {
-                fileLog("SVC: MediaProjection 就绪（投影创建成功）")
-            } else {
-                fileLog("SVC: getMediaProjection 返回 null（授权结果已失效？）")
-            }
-        } catch (error: Exception) {
-            fileLog("SVC: getMediaProjection 失败 - ${error.message ?: error.javaClass.simpleName}")
-        }
-    }
-
-    private fun upgradeToProjection() {
-        try {
-            androidx.core.app.ServiceCompat.startForeground(
-                this,
-                NOTIFICATION_ID,
-                buildNotification(),
-                android.content.pm.ServiceInfo.FOREGROUND_SERVICE_TYPE_CONNECTED_DEVICE or
-                    android.content.pm.ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION,
-            )
-        } catch (error: Exception) {
-            fileLog("SVC: 升级 mediaProjection FGS 类型失败 - ${error.message}")
-        }
-    }
-
     override fun onDestroy() {
         uiHandler.removeCallbacks(stateTick)
         uiHandler.removeCallbacks(freezeTick)
         freezeWatch.reset()
         releaseLocks()
-        // Android 14+：MediaProjection 与前台的 mediaProjection 类型绑定——
-        // 保活服务停止（如用户点「断开连接」）时系统会连带停止投影。
-        fileLog(
-            "SVC: onDestroy（保活服务停止）mediaProjection=" +
-                (if (mediaProjection != null) "仍在（即将被系统回收）" else "null"),
-        )
         super.onDestroy()
-    }
-
-    /** 投影生命周期等关键事件：logcat + 文件双写（HKS 环境下文件是唯一可读通道）。 */
-    private fun fileLog(message: String) {
-        android.util.Log.i("CarPlayService", message)
-        DebugFileLog
-            .append(this, message)
     }
 
     companion object {
@@ -250,14 +182,6 @@ class CarPlayService : Service() {
         /** 通知上的「断开」——直接断开并停服务，不依赖界面是否存活。 */
         const val ACTION_DISCONNECT = "io.github.shaonialife.carptocar.action.NOTIFICATION_DISCONNECT"
         const val ACTION_RECONNECT_CAR_PLUS = "io.github.shaonialife.carptocar.action.NOTIFICATION_RECONNECT_CAR_PLUS"
-
-        /** 镜像模式：授权后由 MainActivity 写入；服务重声明 FGS 类型后方可创建虚拟屏。 */
-        @Volatile
-        var mediaProjection: android.media.projection.MediaProjection? = null
-
-        /** 授权结果暂存：由服务在前台类型升级后调用 getMediaProjection（Android 14+ 顺序要求）。 */
-        @Volatile
-        var pendingProjectionResult: Pair<Int, Intent>? = null
 
         fun start(context: Context) {
             context.startForegroundService(Intent(context, CarPlayService::class.java))

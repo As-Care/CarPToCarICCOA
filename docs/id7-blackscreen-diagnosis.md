@@ -125,56 +125,7 @@ private fun onCtrlInvite(receiverId: String?) {
 
 ### 根因 3：重连首帧不是 IDR（让循环无法自愈）
 
-`VideoSender.startPassthrough()`（新一轮会话，`VideoSender.kt:410`）：
-
-```kotlin
-cachedCsd = null
-sentSps = null
-configSent = false
-awaitingKeyFrameAfterRestart = false      // ← 关键：新会话不要求等 IDR
-```
-
-紧接着 `CarLifeHijack.attach()`（`CarLifeHijack.kt:404`）在会话建立后被调用：
-
-```kotlin
-spsPps?.let { videoSender.seedCsd(it) }   // ← 把 cachedCsd 又填回来，日志"已用缓存 SPS/PPS 预置 csd"
-val pending = ...                          // 从 GOP 缓存取历史帧
-for ((data, key) in pending) { videoSender.submitH264(data, key) }
-```
-
-**注意 `pending` 经常是空的**：`gop` 只在收到 `keyFrame=true` 的帧时才 `clear()` 后重新攒
-（`CarLifeHijack.kt:728`），非关键帧在缓存为空时直接被丢掉。断流到重连之间那 3 秒里
-如果没有 I 帧落在缓存里，`pending` 就是空列表——于是**送给车机的"首帧"其实是 attach 之后
-实时流里的下一帧，它八成是 P 帧**。日志时间差也印证：`53.876` attach → `53.907` 首帧，
-只隔 31ms（≈52fps 的帧间隔），不是历史缓存帧。
-
-配合 `submitH264()` 的兜底分支：
-
-```kotlin
-if (!configSent) {
-    if (hasSps) { sendConfigFromNals(...) }
-    else {
-        val csd = cachedCsd
-        if (csd != null) {
-            log("VIDEO: 新 IDR 未携带 SPS/PPS——用缓存 csd 重发 VideoConfig")
-            sendConfigFromNals(csd, output)     // ← 用旧 csd 拼 config
-        }
-    }
-}
-sendFrameFromNals(nalUnits, keyFrame, output)   // ← 然后把这个 P 帧当首帧发出去
-```
-
-而 `cachedCsd` 之所以不是 null，是因为 attach 里的 `seedCsd()` 又把缓存 SPS/PPS 填了回来。
-那个函数的设计意图写得很清楚：
-
-> 用于「车机重新接上通道、但手上没有带 SPS 的关键帧」…预置后第一帧（哪怕是 P 帧）
-> 就能把 config 发出去，最快一个 IDR 周期就有画面。
-
-**这个前提对 ID7 不成立。** 新建的数据通道 = 新建的 SETUP = 全新的解码器，它手上一帧都没有，
-必须等 IDR。送 P 帧进去，解码器直接报错，车机选择断开整轮会话而不是丢帧静等。
-
-⚠️ 注意：日志里那句 `新 IDR 未携带 SPS/PPS` 是**误导性措辞**——那帧 NAL 类型是 1，根本
-不是 IDR（IDR 是 5）。看日志时容易被这句话带偏，以为送的是关键帧。
+旧会话中，发送端曾把上一轮 SPS/PPS 与首个到达的 P 帧一起发给新的接收端解码器。ID7 在这种情况下会快速关闭会话。当前 ICCOA 直通在开始和重连后等待带有效配置的 IDR。原始日志可通过本页开头的时间和版本定位。
 
 ---
 
@@ -218,18 +169,7 @@ ID7 是 Cinemo 组件栈（`CinemoBTComponent` / `CinemoWIFIComponent` / `Cinemo
 
 ### 1. 新会话必须等 IDR（必改，成本最低）
 
-`startPassthrough()` 里把 `awaitingKeyFrameAfterRestart = true`。
-预置 `cachedCsd` 只允许"提前把 VideoConfig 发出去"，**不能因此放行 P 帧**。
-判据：新会话开流后若首帧 NAL≠5，就丢弃并等——日志会打 `已跳过 N 个非关键帧`。
-
-代价：重连后要等 CarLife 引擎下一个 I 帧（实测 I 帧间隔约 2 秒 / 120 帧），即多等 ≤2 秒。
-收益：**8 次 0.06 秒的秒断全部消失**，这是循环里最大的一块。
-
-**已做（1.2.18）**：`startPassthrough()` / `reconnectDataPort()` / `onSourceRestart()` 三处
-统一走新加的 `beginAwaitingKeyFrame()`（置位 + 记起始时刻 + 清零计数，避免漏记时间戳）。
-额外加了 **3 秒超时兜底**：源迟迟不出 IDR 时放行当前帧——纯"死等"会把「被车机拆」
-换成「自己永久黑屏」，那是更坏的失败模式。日志新增
-`⚠ 等 IDR 超时（Nms，已跳过 M 帧）——放行当前 P 帧`。
+ICCOA 直通使用严格关键帧模式。每轮视频通道开始或恢复后先等 IDR，接收端取得可独立解码的画面后继续接收后续帧。
 
 ### 2. 推流中收到 ctrl 邀请要当回事（必改）
 

@@ -31,7 +31,7 @@
 | 13 | 音频：PCM / AAC-LC / AAC-LC-ADTS、8k~48k、`audioLatency in 95ms / out 80ms` | 从 `/info` 的 `audioLatencies` 动态取，不写死 | 一致（报告值只作兜底参考） |
 | 14 | 屏幕落点：`Driver_Display` / displayable 93，`cropping`、`scaling` 全关 | 推流分辨率必须与 `/info` 声明值逐像素相等，否则车机不缩放直接显示错位 | 一致 |
 | 15 | AirPlay 接收端 `320.17.7`；RTSP 方法表 OPTIONS/ANNOUNCE/SETUP/RECORD/PAUSE/FLUSH/TEARDOWN | `AirPlayClient` 覆盖同一套方法；`srcvers=320.17.7` 已对上 | 一致 |
-| 16 | HID：`fingers: 1`（只报单指）、Knob（select/acHome/acBack）、Remote Playback、`countryCode 9` | 按键映射在 `input/ConsumerKeys.kt`；单指限制是**车机侧**的，真车双指按不出来不是我们的 bug | 一致（`touch-multitouch.md` 的双指结论只适用测试台） |
+| 16 | HID：`fingers: 1`（只报单指）、Knob（select/acHome/acBack）、Remote Playback、`countryCode 9` | 按键映射在 `input/ConsumerKeys.kt`；单指限制是**车机侧**的，真车双指按不出来不是我们的 bug | 双指转发需要车机上报两个触点 |
 | 17 | 鉴权走 I²C 上的 Apple 协处理器（`/dev/i2c-0`，0x11/0x10） | 我们是发送端，只做「挑战 → 收签名 → 自报 0xAA05」，不校验 | 与本项目无关 |
 | 18 | `MGDA` 在 MIB3 上命中 0 次；高德投屏到仪表不可能 | 本项目的 CarLife 劫持走自己的视频通道，不依赖这条 | 与本项目无关 |
 

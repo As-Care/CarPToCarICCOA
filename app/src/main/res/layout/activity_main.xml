@@ -53,10 +53,8 @@
                         android:textSize="11.5sp"
                         android:text="设备检测中" />
 
-                    <!-- 本地 CarLife 劫持的实时状态：车机画面的唯一来源，卡在哪一步
-                         用户一眼就能看到（不必展开日志）。由 MainActivity 定时刷新。 -->
                     <TextView
-                        android:id="@+id/carLifeStatus"
+                        android:id="@+id/carPlusStatus"
                         android:layout_width="match_parent"
                         android:layout_height="wrap_content"
                         android:layout_marginTop="4dp"
@@ -282,22 +280,6 @@
                         android:textStyle="bold" />
                 </LinearLayout>
 
-                <TextView
-                    android:id="@+id/audioTag"
-                    android:layout_width="wrap_content"
-                    android:layout_height="30dp"
-                    android:layout_marginTop="12dp"
-                    android:background="@drawable/bg_icon_tile"
-                    android:drawableStart="@drawable/ic_music_small"
-                    android:drawablePadding="6dp"
-                    android:gravity="center_vertical"
-                    android:paddingStart="13dp"
-                    android:paddingEnd="13dp"
-                    android:text="车机侧声音 · 开启"
-                    android:textColor="@color/m3_on_var"
-                    android:textSize="11.5sp"
-                    android:textStyle="bold"
-                    android:visibility="gone" />
             </LinearLayout>
 
             <!-- ==================== 详情列（横屏时成为右栏） ==================== -->
@@ -1074,48 +1056,14 @@
                     android:layout_marginStart="52dp"
                     android:background="#5A394444" />
 
-                <!-- 本地 CarLife 劫持开关 -->
-                <LinearLayout
-                    android:layout_width="match_parent"
+                <TextView
+                    android:layout_width="wrap_content"
                     android:layout_height="wrap_content"
                     android:layout_marginTop="12dp"
-                    android:gravity="center_vertical"
-                    android:orientation="horizontal">
-
-                    <LinearLayout
-                        android:layout_width="0dp"
-                        android:layout_height="wrap_content"
-                        android:layout_weight="1"
-                        android:orientation="vertical">
-
-                        <TextView
-                            android:layout_width="wrap_content"
-                            android:layout_height="wrap_content"
-                            android:text="@string/local_video_source_title"
-                            android:textColor="@color/m3_on_surface"
-                            android:textSize="14sp"
-                            android:textStyle="bold" />
-
-                        <TextView
-                            android:id="@+id/carLifeHijackNote"
-                            android:layout_width="match_parent"
-                            android:layout_height="wrap_content"
-                            android:layout_marginTop="2dp"
-                            android:text="接管手机原生 CarLife 的码流直推车机（不改分辨率压缩）。"
-                            android:textColor="@color/m3_on_var"
-                            android:textSize="12sp" />
-                    </LinearLayout>
-
-                    <androidx.appcompat.widget.SwitchCompat
-                        xmlns:app="http://schemas.android.com/apk/res-auto"
-                        android:id="@+id/switchCarLifeHijack"
-                        android:layout_width="wrap_content"
-                        android:layout_height="wrap_content"
-                        android:layout_marginStart="8dp"
-                        android:thumb="@drawable/sw_thumb"
-                        app:track="@drawable/sw_track" />
-                </LinearLayout>
-
+                    android:text="本机系统 Car+"
+                    android:textColor="@color/m3_on_surface"
+                    android:textSize="14sp"
+                    android:textStyle="bold" />
             </LinearLayout>
 
             <!-- ==================== 投屏显示 ==================== -->
@@ -1192,32 +1140,6 @@
                     android:textSize="14sp"
                     android:textStyle="bold" />
 
-                <LinearLayout
-                    android:id="@+id/displayScaleControls"
-                    android:layout_width="match_parent"
-                    android:layout_height="wrap_content"
-                    android:layout_marginTop="6dp"
-                    android:gravity="center_vertical"
-                    android:orientation="horizontal">
-
-                    <SeekBar
-                        android:id="@+id/displayScaleSeek"
-                        android:layout_width="0dp"
-                        android:layout_height="wrap_content"
-                        android:layout_weight="1"
-                        android:max="26" />
-
-                    <TextView
-                        android:id="@+id/displayScaleValue"
-                        android:layout_width="52dp"
-                        android:layout_height="wrap_content"
-                        android:layout_marginStart="8dp"
-                        android:gravity="end"
-                        android:text="100%"
-                        android:textColor="@color/m3_on_var"
-                        android:textSize="12sp" />
-                </LinearLayout>
-
                 <TextView
                     android:id="@+id/displaySizeTarget"
                     android:layout_width="match_parent"
@@ -1292,7 +1214,7 @@
                 </LinearLayout>
 
                 <TextView
-                    android:id="@+id/displayScaleNote"
+                    android:id="@+id/displaySizeNote"
                     android:layout_width="match_parent"
                     android:layout_height="wrap_content"
                     android:layout_marginTop="2dp"
@@ -1396,48 +1318,6 @@
                         android:textSize="12sp" />
                 </LinearLayout>
 
-                <!-- 触摸注入节流 -->
-                <TextView
-                    android:layout_width="wrap_content"
-                    android:layout_height="wrap_content"
-                    android:layout_marginTop="14dp"
-                    android:text="滑动上报间隔"
-                    android:textColor="@color/m3_on_surface"
-                    android:textSize="14sp"
-                    android:textStyle="bold" />
-
-                <LinearLayout
-                    android:layout_width="match_parent"
-                    android:layout_height="wrap_content"
-                    android:layout_marginTop="6dp"
-                    android:gravity="center_vertical"
-                    android:orientation="horizontal">
-
-                    <SeekBar
-                        android:id="@+id/throttleSeek"
-                        android:layout_width="0dp"
-                        android:layout_height="wrap_content"
-                        android:layout_weight="1"
-                        android:max="6" />
-
-                    <TextView
-                        android:id="@+id/throttleValue"
-                        android:layout_width="72dp"
-                        android:layout_height="wrap_content"
-                        android:layout_marginStart="8dp"
-                        android:gravity="end"
-                        android:text="关闭"
-                        android:textColor="@color/m3_on_var"
-                        android:textSize="12sp" />
-                </LinearLayout>
-
-                <TextView
-                    android:layout_width="match_parent"
-                    android:layout_height="wrap_content"
-                    android:layout_marginTop="2dp"
-                    android:text="车机滑动有拖延时可小幅调高。拖动后立即生效。"
-                    android:textColor="@color/m3_on_var"
-                    android:textSize="12sp" />
             </LinearLayout>
 
             <!-- ==================== 日志（默认折叠） ==================== -->

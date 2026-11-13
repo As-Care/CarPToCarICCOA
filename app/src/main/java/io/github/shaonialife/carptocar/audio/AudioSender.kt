@@ -1,10 +1,5 @@
 package io.github.shaonialife.carptocar.audio
 
-import android.media.AudioAttributes
-import android.media.AudioFormat
-import android.media.AudioPlaybackCaptureConfiguration
-import android.media.AudioRecord
-import android.media.projection.MediaProjection
 import io.github.shaonialife.carptocar.BuildConfig
 import io.github.shaonialife.carptocar.airplay.AirPlayCrypto
 import io.github.shaonialife.carptocar.airplay.TimingServer
@@ -35,19 +30,15 @@ import java.util.concurrent.atomic.AtomicBoolean
  *  - **同步包**：[AudioSyncPacket] 每 1 秒发往该流的 `controlPort`，建立 RTP↔NTP 锚点。
  *    （缺了它接收端只能「按到达时刻猜」，严格的实现干脆不排播——2026-10-20 实测）
  *
- * 采集：`AudioPlaybackCapture`（Android 10+）捕获手机端其他应用播放的媒体/导航音频
- * （需要 MediaProjection——与镜像模式的同一授权）。每包 [SAMPLES_PER_PACKET] 样本帧
- * （48000Hz 立体声 16bit = 2048B 负载，总包 ~2084B，不超接收端 4096B 收包缓冲）。
+ * ICCOA supplies PCM samples through [feedPcm].
  */
 class AudioSender(
     private val host: String,
     private val dataPort: Int,
     private val streamKey: ByteArray,
     private val log: (String) -> Unit,
-    /** 静音手机媒体音量（声音只从车机出）。null = 不做（测试用）。 */
-    private val context: android.content.Context? = null,
     /**
-     * 采集采样率（Hz）：必须与 SETUP 协商出的格式一致（48k 主选，车机只支持
+     * 发送采样率（Hz）：必须与 SETUP 协商出的格式一致（48k 主选，车机只支持
      * 44.1k 时由 AirPlayClient 协商下发）。默认 48k。
      */
     private val sampleRate: Int = 48_000,
@@ -116,11 +107,6 @@ class AudioSender(
         private const val TAG_SIZE = 16
         private const val NONCE_SIZE = 8
 
-        private const val READ_TIMEOUT_QUIET_MILLIS = 500L
-
-        /** 静音前媒体音量的持久化键（进程被杀也不丢恢复目标）。 */
-        private const val KEY_SAVED_VOLUME = "audio_saved_media_volume"
-
         /** 小端 s16 → 大端 s16（每两字节换序）。CarPlay 线格式要求大端样本。 */
         fun bigEndianS16(source: ByteArray): ByteArray {
             val out = source.copyOf()
@@ -145,8 +131,6 @@ class AudioSender(
     private val stopped = AtomicBoolean(false)
     private var socket: DatagramSocket? = null
     private var syncSocket: DatagramSocket? = null
-    private var record: AudioRecord? = null
-    private var thread: Thread? = null
     private var syncThread: Thread? = null
 
     /** 同步包序号（跨重试连续，避免车机把重发当成乱序丢掉）。 */
@@ -168,7 +152,7 @@ class AudioSender(
     private var aacEncoder: AacLcEncoder? = null
 
     /**
-     * RTP 游标（原本是采集循环里的局部变量）。提到字段上是因为**同步包线程**要读
+     * RTP 游标。**同步包线程**要读
      * 「当前/下一包时间戳」，否则锚点里的时间戳永远对不上真实发出的包。
      */
     @Volatile private var sequence = 0
@@ -179,7 +163,6 @@ class AudioSender(
 
     /** 首个音频包标记（打完就清）；AAC 自检只跑一次。 */
     private var markerPending = true
-    private var selfChecked = false
 
     /** 每包/每帧对应的 PCM 字节数（PCM 通路=一包的负载；AAC 通路=一帧的输入）。 */
     private val framePcmBytes: Int
@@ -196,203 +179,15 @@ class AudioSender(
      */
     private val ssrc = 0
 
-    /** 采集+推流统计（日志限流用）。 */
+    /** 推流统计。 */
     private var packetsSent = 0L
     private var bytesSent = 0L
-    private var lastLogAt = 0L
     private var lastPacketSentAt = 0L
     private var lastSendGapLoggedAt = 0L
-    private var readFailures = 0
 
     val isRunning: Boolean get() = running.get()
 
-    /** 静音前的手机媒体音量 index（-1 = 未静音）。 */
-    private var mutedOriginalVolume = -1
-
-    /**
-     * 静音手机媒体输出：音频通道激活后声音只从车机出（真 CarPlay 行为）。
-     * 依据（实测 2026-10-10）：播放捕获取自 REMOTE_SUBMIX（音量应用点之前），
-     * 手机流音量静音**不影响捕获数据**——手机不响、车机照常出声。
-     *
-     * 恢复值持久化（SharedPreferences）：进程被系统杀死/安装更新时来不及恢复，
-     * 下次静音若读到 0 会把它当"原音量"，导致断开后永久静音（2026-10-10 踩过）。
-     */
-    private fun mutePhoneMedia() {
-        val ctx = context ?: return
-        try {
-            val manager =
-                ctx.getSystemService(android.content.Context.AUDIO_SERVICE)
-                    as android.media.AudioManager
-            if (mutedOriginalVolume >= 0) return
-            val prefs = ctx.getSharedPreferences("settings", android.content.Context.MODE_PRIVATE)
-            val saved = prefs.getInt(KEY_SAVED_VOLUME, -1)
-            val current = manager.getStreamVolume(android.media.AudioManager.STREAM_MUSIC)
-            // 目标恢复值：优先上次未恢复成功的保存值；否则当前值（>0 才可信）
-            val restoreTarget =
-                when {
-                    saved > 0 -> saved
-                    current > 0 -> current
-                    else -> -1
-                }
-            if (restoreTarget > 0) {
-                prefs.edit().putInt(KEY_SAVED_VOLUME, restoreTarget).apply()
-            }
-            mutedOriginalVolume = restoreTarget
-            manager.setStreamVolume(android.media.AudioManager.STREAM_MUSIC, 0, 0)
-            // 回读校验：ROM 的音频策略可能拒绝/立刻回弹（实测见过 volume 仍为原值），
-            // 此时手机继续外放——必须让日志能直接看出来
-            val after = manager.getStreamVolume(android.media.AudioManager.STREAM_MUSIC)
-            log(
-                "AUDIO: 已静音手机媒体输出（原音量 ${if (restoreTarget > 0) restoreTarget else "未知"}，" +
-                    "断开后恢复）——回读音量=$after" +
-                    if (after != 0) "（⚠ 静音未生效，手机仍会外放）" else "",
-            )
-        } catch (error: Exception) {
-            log("AUDIO: 静音手机媒体失败 - ${error.message}")
-        }
-    }
-
-    private fun restorePhoneMedia() {
-        val ctx = context ?: return
-        try {
-            val manager =
-                ctx.getSystemService(android.content.Context.AUDIO_SERVICE)
-                    as android.media.AudioManager
-            val prefs = ctx.getSharedPreferences("settings", android.content.Context.MODE_PRIVATE)
-            val target =
-                when {
-                    mutedOriginalVolume > 0 -> mutedOriginalVolume
-                    else -> prefs.getInt(KEY_SAVED_VOLUME, -1)
-                }
-            if (target > 0) {
-                manager.setStreamVolume(
-                    android.media.AudioManager.STREAM_MUSIC,
-                    target,
-                    0,
-                )
-                // 回读校验：`setStreamVolume` 被 ROM/勿扰拒绝时**不抛异常**、音量仍是 0。
-                // 旧实现在这里无条件写「已恢复」并删掉持久化备份 —— 手机就永久停在静音，
-                // 且日志完全看不出失败（下一次静音时 saved 与 current 两个判据双双失效）。
-                val after = manager.getStreamVolume(android.media.AudioManager.STREAM_MUSIC)
-                if (after == target) {
-                    log("AUDIO: 已恢复手机媒体音量（$target）")
-                    prefs.edit().remove(KEY_SAVED_VOLUME).apply()
-                } else {
-                    // 保留备份：下一轮恢复还会再试，用户手动调音量也能被 saved 兜住。
-                    log(
-                        "AUDIO: ⚠ 恢复手机媒体音量未生效（目标 $target，回读 $after）——" +
-                            "备份已保留，请手动按音量键调整",
-                    )
-                }
-            } else {
-                log("AUDIO: 无有效原音量记录，手机媒体保持当前值（请按音量键调整）")
-                prefs.edit().remove(KEY_SAVED_VOLUME).apply()
-            }
-        } catch (error: Exception) {
-            log("AUDIO: 恢复手机媒体音量失败 - ${error.message}")
-        }
-        mutedOriginalVolume = -1
-    }
-
-    /**
-     * 启动音频发送。需要 MediaProjection（AudioPlaybackCapture 的授权来源）。
-     * 返回是否成功进入采集循环。
-     */
-    fun start(projection: MediaProjection): Boolean {
-        if (running.get()) return true
-        stopped.set(false)
-        return try {
-            val client = DatagramSocket()
-            client.connect(InetAddress.getByName(host), dataPort)
-            socket = client
-
-            // AAC 通路先把编码器立起来：编不出来就没必要采集（也避免「有包无声」的假象）
-            if (codec == AudioCodec.AAC_LC) {
-                val encoder = AacLcEncoder(sampleRate, CHANNELS, wrapAdts = adtsFrames, log = log)
-                if (!encoder.start()) {
-                    client.close()
-                    socket = null
-                    return false
-                }
-                aacEncoder = encoder
-            }
-
-            val captureConfig = buildCaptureConfig(projection)
-            val audioFormat =
-                AudioFormat
-                    .Builder()
-                    .setEncoding(AudioFormat.ENCODING_PCM_16BIT)
-                    .setSampleRate(sampleRate)
-                    .setChannelMask(AudioFormat.CHANNEL_IN_STEREO)
-                    .build()
-            val recorder =
-                AudioRecord
-                    .Builder()
-                    .setAudioPlaybackCaptureConfig(captureConfig)
-                    .setAudioFormat(audioFormat)
-                    .setBufferSizeInBytes(framePcmBytes * 8)
-                    .build()
-            if (recorder.state != AudioRecord.STATE_INITIALIZED) {
-                log("AUDIO: AudioRecord 初始化失败（state=${recorder.state}）")
-                runCatching { recorder.release() }
-                aacEncoder?.stop()
-                aacEncoder = null
-                client.close()
-                socket = null
-                return false
-            }
-            record = recorder
-            running.set(true)
-            mutePhoneMedia()
-            log(
-                "AUDIO: 已启动（播放捕获 ${sampleRate}Hz 立体声 → $host:$dataPort，" +
-                    "通路=t$streamType/${codec.name}，" +
-                    if (codec == AudioCodec.AAC_LC) {
-                        "每包 1 个 AAC 帧（${AacLcEncoder.FRAME_SAMPLES} 采样" +
-                            (if (adtsFrames) "，ADTS 封装））" else "，裸帧））")
-                    } else {
-                        "每包 ${SAMPLES_PER_PACKET} 帧 PCM）"
-                    },
-            )
-
-            // 同步包线程先起：锚点越早建立，接收端越早能排播
-            startSyncLoop()
-
-            Thread(
-                {
-                    try {
-                        recorder.startRecording()
-                    } catch (error: Exception) {
-                        log("AUDIO: 启动采集失败 - ${error.message}")
-                        stop()
-                        return@Thread
-                    }
-                    runCaptureLoop()
-                },
-                "audio-capture",
-            ).apply {
-                isDaemon = true
-                start()
-                thread = this
-            }
-            true
-        } catch (error: Exception) {
-            log("AUDIO: 启动失败 - ${error.message}")
-            stop()
-            false
-        }
-    }
-
-    /**
-     * 启动**直通模式**音频发送（无需 MediaProjection / 播放捕获授权）。
-     *
-     * 音频数据由外部通过 [feedPcm] 注入（如 CarLife 引擎的裸 PCM），这里只负责
-     * 封包（RTP + ChaCha20 密封）与发送——彻底绕开「本机播放 + 播放捕获」中转，
-     * 因此不依赖录屏授权，也少一次系统内混音/重采样往返。
-     *
-     * 采样率/声道对齐由注入方负责（[feedPcm] 会按 [sampleRate]/[CHANNELS] 重采样），
-     * 但 AAC 通路仍走 [AacLcEncoder]（注入的是 PCM，编码照常）。
-     */
+    /** Starts the negotiated RTP stream. ICCOA supplies the samples through [feedPcm]. */
     fun startPassthrough(keepAlive: Boolean = true): Boolean {
         if (running.get()) return true
         stopped.set(false)
@@ -419,8 +214,6 @@ class AudioSender(
             }
 
             running.set(true)
-            // 直通模式不静音手机：音频来源是 CarLife 引擎（它已自行采集并推 PCM），
-            // 静音 STREAM_MUSIC 可能破坏引擎的采集源（采集点不确定，不能赌是 REMOTE_SUBMIX）。
             log(
                 "AUDIO: 已启动直通模式（外部注入 PCM → $host:$dataPort，" +
                     "通路=t$streamType/${codec.name}，目标 ${sampleRate}Hz 立体声，spf=$samplesPerPacket）",
@@ -518,25 +311,7 @@ class AudioSender(
         thread.start()
     }
 
-    /**
-     * 直通模式下由外部注入一段 PCM（16bit 交织）。
-     *
-     * 会自动把任意采样率/声道数的输入重采样到 [sampleRate]/[CHANNELS]（立体声），
-     * 再按固定帧长（PCM 通路=每包 [SAMPLES_PER_PACKET] 采样、AAC 通路=每帧
-     * [AacLcEncoder.FRAME_SAMPLES] 采样）累积切帧后走封包/编码/发送。非直通模式
-     * （采集循环在跑）时忽略——两条路径不该同时喂数据。
-     *
-     * @param srcPcm   输入 PCM（16bit 小端交织）
-     * @param size     有效字节数
-     * @param srcRate  输入采样率（<=0 时按 [sampleRate] 处理，不重采样）
-     * @param srcChannels 输入声道数（1 或 2；其它按 2 处理）
-     */
-    /**
-     * 外部注入 PCM（CarLife 直通）。
-     *
-     * **必须同步**：媒体（9240）与 TTS（9241）是两条独立读线程，2026-10-27 接入导航播报
-     * 后两路会同时进来，帧缓冲和写入位置必须一起保护，避免半帧交错。
-     */
+    /** Accumulates ICCOA PCM into negotiated PCM packets or AAC input frames. */
     @Synchronized
     fun feedPcm(
         srcPcm: ByteArray,
@@ -544,7 +319,7 @@ class AudioSender(
         srcRate: Int = 0,
         srcChannels: Int = 2,
     ) {
-        if (!running.get() || record != null) return // 采集模式在跑时不接受注入
+        if (!running.get()) return
         if (size <= 0) return
         // 真实 PCM 到场：静音保活立刻让位（这一行必须在 alignPcm 之前，
         // 否则重采样失败时空转判定会误以为「一直没声音」）
@@ -569,7 +344,7 @@ class AudioSender(
      * 把一段 PCM 重采样到 [sampleRate] 立体声，返回新数组；无需处理时返回原输入。
      *
      * 只做两种常见比值的线性重采样（44.1k↔48k）+ 声道扩展，避免引入第三方重采样库：
-     * CarLife 引擎实际只会输出 44.1k 或 48k。其它任意比值退化为按 [sampleRate] 直接
+     * 常见输入采样率是 44.1k 或 48k。其它任意比值退化为按 [sampleRate] 直接
      * 截断/复读，保证不出错（宁可有轻微音高偏移，也不中断推流）。
      */
     private fun alignPcm(
@@ -650,19 +425,10 @@ class AudioSender(
         }
     }
 
-    /**
-     * 停止音频。
-     *
-     * 收尾路径不止一条（采集线程 finally、会话结束回调、手动断开），会重复调用；
-     * 必须幂等——否则「已恢复手机媒体音量」会打两遍，且在用户于会话期间手动改过
-     * 音量时，第二次恢复会用旧值把它覆盖回去。
-     */
+    /** Stops the audio socket, encoder and keep-alive threads once. */
     fun stop() {
         if (!stopped.compareAndSet(false, true)) return
         running.set(false)
-        runCatching { record?.stop() }
-        runCatching { record?.release() }
-        record = null
         aacEncoder?.stop()
         aacEncoder = null
         runCatching { socket?.close() }
@@ -672,8 +438,6 @@ class AudioSender(
         syncThread = null
         keepAliveThread?.interrupt()
         keepAliveThread = null
-        thread = null
-        restorePhoneMedia()
         if (syncSent > 0 && syncIcmpDeferrals > 0) {
             log(
                 "AUDIO: 同步包共发出 $syncSent 个，其中 $syncIcmpDeferrals 次被车机 controlPort 的 " +
@@ -681,21 +445,6 @@ class AudioSender(
             )
         }
         log("AUDIO: 已停止（共发 $packetsSent 包 / ${bytesSent / 1024}KB）")
-    }
-
-    /** 捕获配置：媒体/游戏/导航等常见播放用途（逐项添加，个别用途被系统拒绝时跳过）。 */
-    private fun buildCaptureConfig(projection: MediaProjection): AudioPlaybackCaptureConfiguration {
-        val builder = AudioPlaybackCaptureConfiguration.Builder(projection)
-        listOf(
-            AudioAttributes.USAGE_MEDIA,
-            AudioAttributes.USAGE_GAME,
-            AudioAttributes.USAGE_UNKNOWN,
-            AudioAttributes.USAGE_ASSISTANCE_NAVIGATION_GUIDANCE,
-            AudioAttributes.USAGE_ASSISTANCE_SONIFICATION,
-        ).forEach { usage ->
-            runCatching { builder.addMatchingUsage(usage) }
-        }
-        return builder.build()
     }
 
     // ---- 音频同步包（RTP 时间戳 ↔ NTP，每秒一个） ----
@@ -827,99 +576,6 @@ class AudioSender(
         syncThread = worker
     }
 
-    // ---- 采集循环 → 封包发送 ----
-
-    private fun runCaptureLoop() {
-        val recorder = record ?: return
-        val frameBytes = framePcmBytes
-        val pcm = ByteArray(frameBytes)
-        // 诊断抽样节拍：PCM 约 125 包/s（每 20s 一次）；AAC 约 47 帧/s
-        val diagnosticStride = if (codec == AudioCodec.AAC_LC) 600 else 1875
-        try {
-            while (running.get()) {
-                val read =
-                    try {
-                        recorder.read(pcm, 0, pcm.size, AudioRecord.READ_BLOCKING)
-                    } catch (error: Exception) {
-                        log("AUDIO: 采集读取异常 - ${error.message}")
-                        break
-                    }
-                if (read < 0) {
-                    readFailures++
-                    if (readFailures == 1 || readFailures % 100 == 0) {
-                        log("AUDIO: 采集错误码 $read（连续 $readFailures 次）")
-                    }
-                    if (readFailures > 500) break
-                    Thread.sleep(READ_TIMEOUT_QUIET_MILLIS)
-                    continue
-                }
-                if (read < frameBytes) continue // 残包（缓冲尾部）：丢弃，等下一个整包
-                readFailures = 0
-
-                // 内容诊断（2026-10-17）：播放捕获可能拿到全零（app 禁止捕获 / 音频路由
-                // 到蓝牙 / 无音频播放）。全零时车机静音但手机仍在响，用户会报「声音在
-                // 手机上」——必须能区分「没采到」与「采到了但车机没播」。
-                if (sequence < 3 || sequence % diagnosticStride == 0) {
-                    var nonZero = 0
-                    var peak = 0
-                    var index = 0
-                    while (index + 1 < read) {
-                        val value = ((pcm[index + 1].toInt() and 0xFF) shl 8) or (pcm[index].toInt() and 0xFF)
-                        val magnitude = if (value > 32767) 65536 - value else value
-                        if (magnitude > peak) peak = magnitude
-                        if (magnitude > 0) nonZero++
-                        index += 2
-                    }
-                    val percent = nonZero * 100 / (read / 2).coerceAtLeast(1)
-                    log(
-                        "AUDIO: 采集样本 seq=$sequence 非零$percent% 峰值=$peak" +
-                            if (peak == 0) "（⚠ 全零：捕获不到音频——app 可能禁止播放捕获或音频走了蓝牙）" else "",
-                    )
-                }
-
-                // PCM 通路：采一段 = 发一包；AAC 通路：喂一帧 PCM，编码器可能吐出 0~N 帧
-                val payloads: List<ByteArray> =
-                    if (codec == AudioCodec.AAC_LC) {
-                        val encoder = aacEncoder ?: break
-                        encoder.encode(pcm, frameBytes)
-                    } else {
-                        listOf(pcm)
-                    }
-                if (payloads.isEmpty()) continue
-
-                // 一次性自检：把编码结果自己解一遍，证明比特流有效且非静音。
-                // 这是「车机无声」最需要的一条证据——如果自解码峰值是 0，问题在编码器，
-                // 如果自解码有声音而车机静音，问题在车机侧（会话/音量/路由）。
-                if (!selfChecked) {
-                    selfChecked = true
-                    verifyEncodedFrame(payloads.first())
-                }
-
-                var sendFailed = false
-                for (payload in payloads) {
-                    if (!sendPayload(payload)) {
-                        sendFailed = true
-                        break
-                    }
-                }
-                if (sendFailed) break
-                val now = android.os.SystemClock.uptimeMillis()
-                if (now - lastLogAt >= 30_000L) {
-                    lastLogAt = now
-                    log(
-                        "AUDIO: 推流中（累计 $packetsSent 包，${bytesSent / 1024}KB，" +
-                            "seq=$sequence ts=$timestamp）",
-                    )
-                }
-            }
-        } catch (error: Throwable) {
-            // 后台线程未捕获异常会杀死整个进程——音频异常绝不允许冒泡
-            log("AUDIO: 采集线程异常退出 - ${error.message}")
-        } finally {
-            stop()
-        }
-    }
-
     /** 封包 + 发送一包（同步更新 seq/ts/nonce 游标）。返回 false 表示链路已断。 */
     @Synchronized
     private fun sendPayload(payload: ByteArray): Boolean {
@@ -954,37 +610,6 @@ class AudioSender(
         }
     }
 
-    /** 用平台解码器把首帧解回 PCM，记录峰值（后台线程，不阻塞推流）。 */
-    private fun verifyEncodedFrame(frame: ByteArray) {
-        val payload = frame.copyOf()
-        Thread(
-            {
-                try {
-                    val result = AacLcEncoder.decodePeak(payload, sampleRate, CHANNELS)
-                    if (result == null) {
-                        log("AUDIO: 自检 = 本机解码器没解出样本（首帧 ${payload.size}B）——无法证伪，继续推流")
-                        return@Thread
-                    }
-                    val (peak, samples) = result
-                    log(
-                        "AUDIO: 自检 = 首帧 ${payload.size}B 本机解码 $samples 个样本，峰值 $peak" +
-                            if (peak > 0) {
-                                "（✓ 比特流有效且非静音：车机若无声，问题不在编码/加密）"
-                            } else {
-                                "（⚠ 解码为全零：AAC 编码器输出的是静音数据）"
-                            },
-                    )
-                } catch (error: Exception) {
-                    log("AUDIO: 自检解码异常 - ${error.message}")
-                }
-            },
-            "audio-selfcheck",
-        ).apply {
-            isDaemon = true
-            start()
-        }
-    }
-
     /** 组一个 RTP 包：明文 PCM → ChaCha20 密封 → [头][密文+tag][nonce8]。（internal：测试直测） */
     internal fun sealPacket(
         pcm: ByteArray,
@@ -998,7 +623,7 @@ class AudioSender(
         val aad = header.copyOfRange(4, RTP_HEADER_LEN)
         // 关键：CarPlay 线格式的 LPCM 是**大端** s16 样本——接收端对收到的负载做
         // byteSwapS16 转回小端再喂 AudioTrack（DiPlay AndroidMediaSink.kt:1687）。
-        // Android 采集是原生小端，因此这里必须换序；漏掉会得到「沙沙声」（2026-10-10 实测）。
+        // ICCOA 提供的 PCM 是小端，因此这里必须换序；漏掉会得到「沙沙声」（2026-10-10 实测）。
         //
         // AAC 通路不做换序：AAC 比特流是字节流，不是 16bit 样本序列，换序会直接把
         // 比特流搅烂（车机解码失败 → 有包无声）。

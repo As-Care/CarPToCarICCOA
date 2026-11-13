@@ -11,7 +11,6 @@ import android.os.SystemClock
 import android.util.Log
 import android.view.Surface
 import io.github.shaonialife.carptocar.launcher.settings.AppOrientationCompat
-import io.github.shaonialife.carptocar.launcher.settings.DisplayPrefs
 import io.github.shaonialife.carptocar.media.NotificationAccess
 import io.github.shaonialife.carptocar.render.CARD_MARGIN_PX
 import io.github.shaonialife.carptocar.render.DASH_GAP_PX
@@ -511,7 +510,7 @@ object VirtualLauncher {
         val composer = DualDisplayComposer(encoderSurface, totalWidth, totalHeight, dockAtBottom)
         // 建屏时按默认 60：车机 maxFPS 要到 AirPlay SETUP 之后才知道，
         // 那一刻 SessionController 会调 setStreamFps() 改成跟随值。
-        composer.targetFps = DisplayPrefs.FPS
+        composer.targetFps = 60
         this.composer = composer
         val displaysCreated = arrayOf(false)
         composer.onSurfacesReady = { dockSurface, appSurface, appHiSurface, mapSurface ->

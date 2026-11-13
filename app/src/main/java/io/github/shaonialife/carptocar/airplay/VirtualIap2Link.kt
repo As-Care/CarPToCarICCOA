@@ -52,7 +52,7 @@ class VirtualIap2Link(
      *
      * 0x5000（StartNowPlayingUpdates）订阅到达时调用：返回非 null 就发带真实歌名的
      * 0x5001 NowPlayingUpdate，否则退化为空态（车机存活前置）。由 SessionController
-     * 注入（数据源 = CarLife 内置播放器经 0x10035 推来的歌名，见 CarLifeHijack）。
+     * 注入（数据源为系统媒体会话）。
      */
     private val nowPlayingProvider: (() -> CarPlayNowPlaying?)? = null,
     /**
@@ -229,7 +229,7 @@ class VirtualIap2Link(
      * 主动推送一次 0x5001 NowPlayingUpdate（歌名变化时由宿主调用）。
      *
      * 车机只在订阅（0x5000）时收到一次 0x5001；而歌名是用户开始播放音乐后才经
-     * CarLife 0x10035 到达的——若订阅先于歌名，就会停在空态。所以歌名就绪后必须
+     * 系统媒体会话更新时发送的——若订阅先于歌名，就会停在空态。所以歌名就绪后必须
      * 由外部主动补推一次。链路尚未建立（MIB3 未识别）时静默忽略。
      */
     fun pushNowPlaying() {
@@ -267,7 +267,7 @@ class VirtualIap2Link(
      * 车机订阅 0x5000 之后，按 [NOW_PLAYING_POLL_MILLIS] 周期主动查一次歌名。
      *
      * 存在的理由：0x5000 应答是**一次性**的，空态之后车机不会再来问；而补推原本
-     * 完全依赖 MediaSession / CarLife 的**变化事件**。若歌名先于订阅就存在（音乐
+     * 完全依赖 系统媒体会话 的**变化事件**。若歌名先于订阅就存在（音乐
      * 早就在放），或通知监听器晚绑定（vivo Android 17 上 requestRebind 常不生效），
      * 就再也不会有事件 → 仪表永久空白，且手机侧日志一条错误都没有。
      *
@@ -855,12 +855,8 @@ class VirtualIap2Link(
     private fun fireHidKeysLocked(usages: List<Int>) {
         val now = nowMillis()
         if (usages.isEmpty()) {
-            val released = lastHidUsages
             lastHidUsages = emptySet()
             hidHoldStartedAtMs = 0L
-            // 真松手才回调（按住期间的重复报告不会走到这里）。只对「刚才有按键」
-            // 的那一次给事件，避免车机空闲时持续推 0x00 把上层刷爆。
-            if (released.isNotEmpty()) onHidKeysReleased?.invoke(released)
             return
         }
         val fresh = usages.filter { it !in lastHidUsages }
@@ -983,15 +979,6 @@ class VirtualIap2Link(
      * 只有 iAP2 链路真正建立后才会来（见 [eventLinkArmed]）。
      */
     var onMediaKey: ((Int) -> Unit)? = null
-
-    /**
-     * 引擎回调：HID 报告从「有按键」变成「全松开」时，本次释放的 usage 集合。
-     *
-     * 1.2.22 新增，给语音键长按 PTT 的 `KEYCODE_VR_STOP` 收尾用。这是状态式报告的
-     * **边沿**：按住时 ~10Hz 连推同一个 usage，只有真正松开才会给空集合，不会刷屏。
-     */
-    var onHidKeysReleased: ((Set<Int>) -> Unit)? = null
-
 
     /** 车机在 0x6800 StartHID 里给出的 HID 描述符（解析报告用；null = 未提供）。 */
     private var hidDescriptor: ByteArray? = null

@@ -23,8 +23,7 @@ import java.util.concurrent.atomic.AtomicBoolean
  *  - opcode 0 = VideoFrame：ChaCha20-Poly1305 密封的「4 字节 BE 长度前缀 NAL 序列」，
  *    nonce = nonce64(帧计数)，计数按帧顺序从 0 递增
  *
- * 视频源：MediaCodec Surface 输入（H.264 硬编码），内容由画面源渲染
- * （隐形屏模式的 DualDisplayComposer 输入 Surface）。
+ * 视频来自 ICCOA H.264 直通，或兼容回退的 MediaCodec Surface。
  */
 class VideoSender(
     private val host: String,
@@ -38,7 +37,7 @@ class VideoSender(
     /** H.264 4:2:0 要求偶数尺寸——奇数高度会让编码器在首帧输入时进错误态（125% 缩放实测踩坑）。 */
     width: Int,
     height: Int,
-    /** 目标帧率（30/60）：编码器元数据 + 60fps 提码率；实际节奏由合成器驱动。 */
+    /** 目标帧率，用于配置 Surface 回退的编码器。 */
     private val targetFps: Int = 30,
     private val log: (String) -> Unit,
     /** 推流自然结束（对端断开等）时回调——CarPlay 会话真实结束的信号。 */
@@ -58,20 +57,11 @@ class VideoSender(
      * 与车机实际画布不符就解不出画面——会话、触摸、心跳全正常，日志一个错都没有。
      * 所以它优先于任何「码流侧」的尺寸（引擎码流、SPS）。
      *
-     * 不能省：直通模式下码流尺寸由 CarLife 引擎决定，引擎白名单会降档
+     * 直通源的实际尺寸可能与车机画布不同
      * （申请 1412×654 实编 1280×720，2026-11-04 奥迪 3810 实测），
      * 此时若照码流声明，车机拿到的是 720p 画布（≠ 1412×654）→ 整屏黑。
      */
     private val canvasSize: (() -> Pair<Int, Int>)? = null,
-    /**
-     * 直通模式下**实时**取「引擎实际编码分辨率」的回调（返回 98311 上报的宽高）。
-     *
-     * 只在**没有画布信息**时兜底（`canvasSize` 为空/0）。含义是「码流实际多少」，
-     * 用来跟随引擎中途重建编码器；它不是画布契约——把它当声明值用，就会在
-     * 「画布 ≠ 码流」的车机上黑屏（2026-11-04 奥迪 3810 实测）。
-     * 每次发 config 都现取，就永远跟得上。
-     */
-    private val liveSize: (() -> Pair<Int, Int>)? = null,
     /**
      * **显示视口**（VideoConfig 头 `params[3]` / `params[4]`，偏移 32/36 与 40/44）。
      *
@@ -106,7 +96,7 @@ class VideoSender(
     /**
      * 视频数据口的**唯一写锁**。
      *
-     * 直通模式下有两条线程会往同一个 socket 写字节：CarLife 帧线程（[submitH264]）
+     * 直通模式下有两条线程会往同一个 socket 写字节：ICCOA 帧线程（[submitH264Nals]）
      * 和屏保活线程（[passthroughKeepAliveLoop]：keepAlive + 空闲重发 IDR）。
      * 不加锁时两边的 `write(header)` / `write(body)` 会交错，接收端拿到的就是一帧
      * 半 A 半 B 的乱码 —— ChaCha20-Poly1305 的 tag 校验必然失败。
@@ -160,7 +150,7 @@ class VideoSender(
     /**
      * 最近一次成功发出的 csd（SPS/PPS NAL，含 NAL 头、不含起始码）。
      *
-     * CarLife 换一轮会话后，新编码器**未必**在首个 IDR 里带 SPS/PPS；此时若手上没有
+     * 源端换一轮会话后，新编码器**未必**在首个 IDR 里带 SPS/PPS；此时若手上没有
      * 缓存就发不出 VideoConfig，`configSent` 永远 false → 每一帧都被丢弃。
      * 缓存它就能在源重启后立刻用旧参数重发 config 兜底（新 SPS 到达时再覆盖）。
      */
@@ -199,7 +189,7 @@ class VideoSender(
     /**
      * 是否有**真实视频流**正在写进车机通道（最近 5s 内写过帧）。
      * 判定只认「帧真正发出去了」（[lastFrameAtMs] 只在 sendFrameFromNals 成功后更新），
-     * 不认 CarLife 侧的握手/进程状态——UI 与提示逻辑都用它，避免「显示已劫持却没画面」。
+     * 以实际写出的帧为准——UI 与提示逻辑都用它，避免「显示已劫持却没画面」。
      */
     val isVideoFlowing: Boolean
         get() = running.get() && lastFrameAtMs > 0 &&
@@ -518,11 +508,11 @@ class VideoSender(
      * 否则车机可能一直卡在「等下一个 I 帧」的状态，表现就是「连上了但没画面」
      * （宝马 iD9 2026-10-20 实测：会话刚起时收到一次 forceKeyFrame）。
      */
-    // ---- 外部码流直通（CarLife 劫持分支）----
+    // ---- 外部码流直通----
 
     /**
-     * 直通模式启动：不建 MediaCodec，直接把外部 H.264 帧经 [submitH264] 送进同一条
-     * 屏幕流通道（同样加密、同样 128B 头）。用于「本地劫持原生 CarLife 再转发给车机」。
+     * 直通模式启动：不建 MediaCodec，直接把外部 H.264 帧经 [submitH264Nals] 送进同一条
+     * 屏幕流通道（同样加密、同样 128B 头）。
      */
     @Synchronized
     fun startPassthrough(strictKeyFrames: Boolean = false): Boolean {
@@ -545,11 +535,7 @@ class VideoSender(
         sentSps = null
         configSent = false
         // **必须等 IDR**（2026-11-03 ID7 实测）：此前这里是 false，配合下面 attach() 后
-        // `seedCsd()` 预置的 cachedCsd，submitH264 会走「用缓存 csd 重发 VideoConfig」
-        // 分支把**当前这一帧 P 帧当成新流的首帧**发出去。车机解码器刚重建、一帧参考都没有，
-        // 收到 P 帧直接拆整轮会话：15 次断流里有 8 次是「首帧 NAL=1 → 0.1~0.2 秒被 reset」，
-        // 而 7 次「首帧 NAL=7,8,5」全部活过 7 秒，无一例外。
-        // 预置 csd 仍然有用：它让首个 IDR 一到就能立刻发 config，只是不许放行 P 帧。
+        // A new receiver decoder needs an IDR before it can accept inter frames.
         beginAwaitingKeyFrame()
         log("VIDEO: 直通模式启动（外部 H.264，跳过重编码）${width}x$height")
         Thread({ passthroughKeepAliveLoop() }, "video-passthrough-ka").apply {
@@ -593,17 +579,7 @@ class VideoSender(
         }
     }
 
-    /**
-     * 空闲保活：CarLife 不再出帧时，周期性重发**最后一个 IDR**。
-     *
-     * 车机侧只要视频流静默太久就判定「源断了」并拆整轮会话（2026-10-25 日志实测：
-     * 音频一直在推、视频 0 帧超过 ~30s，车机发 EOF 断开）。CarLife 不产帧的常见
-     * 原因是它自己的虚拟屏上没内容（用户还没在 CarLife+ 里点「无线连接」），
-     * 但此时**音频和触摸其实都还活着**——被拆掉纯属浪费。
-     *
-     * 重发 IDR 而不是最后一帧 P 帧：IDR 自包含，重复解码只会得到同一幅画面；
-     * P 帧重复会让车机按错误参考帧叠加，出现花屏。
-     */
+    /** 静止画面时周期性重发最后一个 IDR，维持车机的视频通道。 */
     private fun maybeResendIdleFrame(output: java.io.OutputStream) {
         val nals = lastIdrNals ?: return
         val now = android.os.SystemClock.uptimeMillis()
@@ -624,45 +600,7 @@ class VideoSender(
         }
     }
 
-    /**
-     * 提交一帧外部 H.264（AnnexB，含 00 00 00 01 起始码）。
-     * 首次遇到含 SPS/PPS 的帧时自动发 VideoConfig；返回 false 表示被丢弃。
-     */
-    /**
-     * **CarLife 源重启**：引擎断开重连 / 用户重开一次「无线连接」时由劫持层调用。
-     *
-     * 场景（2026-10-25 用户实测）：CarPlay 会话一直保持，手机端 CarLife 掉线重连后，
-     * 车机再也收不到画面。原因是 `VideoSender` 的会话级状态没跟着源一起重置：
-     *
-     * - `configSent` 仍是 true → 新码流的 VideoConfig 永远不会再发。新车机解码器 /
-     *   已重建的解码器手里是上一轮的 avcC，新 SPS 一比就废（改过分辨率时更必然）。
-     * - 旧 `lastIdrNals` 还在 → 空闲保活会把**上一轮的 IDR** 反复送给车机。
-     * - 旧源的参考帧与新的完全无关 → 新源开头那几个 P 帧解出来就是花屏。
-     *
-     * 所以这里清配置态、丢掉旧 IDR、并在新 IDR 到来前拒收 P 帧。
-     *
-     * ⚠️ **`frameCounter` 绝不能归零**：仍是同一条 AirPlay 视频流、同一把 key，
-     * 计数器归零 = ChaCha/AES 的 nonce 复用，车机侧 AEAD 校验必然失败，
-     * 表现就是「重连后一帧都过不去」。只有换整轮会话（新 SETUP）才允许归零。
-     */
-    fun onSourceRestart(reason: String) {
-        if (!running.get()) return
-        configSent = false
-        beginAwaitingKeyFrame()
-        // 不在这里清 lastIdrNals：源重启到新源出首帧之间可能有几秒空窗，
-        // 旧 IDR 还能继续喂保活，避免车机因「视频静默」拆掉整轮会话。
-        // 一旦真的发出新 config，sendConfigFromNals 会立刻把它作废。
-        lastFrameAtMs = android.os.SystemClock.uptimeMillis()
-        log("VIDEO: 检测到 CarLife 源重启（$reason）——重置配置、等待新 IDR（帧计数保持，nonce 不复用）")
-    }
-
-    /**
-     * 进入「等下一个 IDR」状态：置位 + 记起始时刻 + 清零丢弃计数。
-     *
-     * 三处调用点（新会话 [startPassthrough] / 视频通道重连 [reconnectDataPort] /
-     * 源重启 [onSourceRestart]）共用，**不要各自赋值**——漏记时间戳会让超时兜底
-     * 拿上一轮的旧时刻比较，`submitH264` 会在刚置位的瞬间就判定「已超时」把 P 帧放行。
-     */
+    /** Wait for an IDR after opening or recovering the video channel. */
     private fun beginAwaitingKeyFrame() {
         awaitingKeyFrameSince = android.os.SystemClock.uptimeMillis()
         awaitingKeyFrameAfterRestart = true
@@ -670,46 +608,6 @@ class VideoSender(
         // 等 IDR = 换了一路码流的时间基准，排队延迟的基线必须跟着重来。
         // 顺着这里做而不是各调用点各写一遍，理由同上面那两个时间戳。
         deliveryGate.reset()
-    }
-
-    /**
-     * 用上层缓存的 SPS/PPS（AnnexB，含起始码）预置 csd。
-     *
-     * 用于「车机重新接上通道、手上暂时没有带 SPS 的关键帧」：此前只能干等引擎下一次
-     * 编码器重建（4s 看门狗）才发得出 VideoConfig，这段时间车机就是黑屏。
-     * 预置后，**首个 IDR 一到**就能立刻把 VideoConfig 发出去（IDR 常常不带 SPS/PPS），
-     * 不用再等下一个带 SPS 的关键帧。
-     *
-     * ⚠️ 预置 csd **不等于**可以先送 P 帧：新会话必须等 IDR（见 [beginAwaitingKeyFrame] 的
-     * 调用点）。2026-11-03 ID7 的 8 次秒断就是这个误解造成的——预置了 csd、
-     * 于是 P 帧把 config 带出去、自己也被当首帧发走，车机解码器直接 reset。
-     *
-     * 已有 csd 时不覆盖：真实码流里的 SPS 永远比缓存更可信。
-     */
-    fun seedCsd(annexB: ByteArray) {
-        if (cachedCsd != null) return
-        val nals = splitAnnexB(annexB)
-        val sps = nals.firstOrNull { it.isNotEmpty() && (it[0].toInt() and 0x1F) == 7 } ?: return
-        val pps = nals.firstOrNull { it.isNotEmpty() && (it[0].toInt() and 0x1F) == 8 } ?: return
-        cachedCsd = listOf(sps, pps)
-        log("VIDEO: 已用缓存 SPS/PPS 预置 csd（${sps.size}B/${pps.size}B）")
-    }
-
-    /**
-     * 直通模式送一帧 H.264（来自 CarLife 引擎）。
-     *
-     * @param sourceTimestampMs CarLife 帧头 `[4..7]` 的毫秒时间戳（0/负 = 取不到）。
-     *   只用来算「排队延迟」——基准未知也没关系，闸门内部取历史最小值当基线。
-     *   缓存回放（[CarLifeHijack.attach] 补历史 GOP）**不要**传：那批帧本来就旧，
-     *   传进来会被误判成「已经在排队」。
-     */
-    fun submitH264(
-        data: ByteArray,
-        keyFrame: Boolean,
-        sourceTimestampMs: Long? = null,
-    ): Boolean {
-        if (!running.get()) return false
-        return submitH264Nals(splitAnnexB(data), keyFrame, sourceTimestampMs)
     }
 
     /** Sends already parsed Annex B NAL units, avoiding a second split and copy on the ICCOA path. */
@@ -787,7 +685,7 @@ class VideoSender(
             sendFrameFromNals(nalUnits, keyFrame, output)
             val writtenAtMs = android.os.SystemClock.uptimeMillis()
             // 写入耗时本身就是背压指标：socket 写不动时会直接阻塞在这里，
-            // 而这条调用链跑在 CarLife 的读线程上，一卡就是一整条视频通路在卡。
+            // 而这条调用链跑在 ICCOA 视频读取线程上，一卡就是一整条视频通路在卡。
             val verdict = deliveryGate.onFrame(
                 nowMs = writtenAtMs,
                 sourceTsMs = sourceTimestampMs,
@@ -829,39 +727,6 @@ class VideoSender(
             log("VIDEO: 请求关键帧失败 - ${error.message}")
             false
         }
-    }
-
-    /**
-     * 把一行提示文字渲染成单帧 H.264 推到车机——用于「CarLife 没劫持到画面」时
-     * 在车机屏幕上显示文字，代替黑屏。
-     *
-     * 只在直通模式下有意义（此时 VideoSender 不持有编码器，画面来自外部 H.264）。
-     * 编码失败一律返回 false，调用方保留「仅日志」兜底即可。
-     */
-    fun pushNotice(lines: List<String>): Boolean {
-        if (!running.get() || !passthrough) return false
-        val frame = runCatching { NoticeFrameEncoder.encodeNotice(width, height, lines) }
-            .getOrElse { error ->
-                // 带异常类型与调用栈：MediaCodec 的厂商异常 message 经常语焉不详（如"10 > -2145395697"），
-                // 只有类型+堆栈才能一次定位。
-                val top = error.stackTrace.take(5).joinToString(" ← ") {
-                    "${it.className.substringAfterLast('.')}.${it.methodName}:${it.lineNumber}"
-                }
-                log("VIDEO: 通知帧编码异常 - ${error.javaClass.simpleName}: ${error.message} @ $top")
-                return false
-            } ?: run {
-                log("VIDEO: 通知帧编码失败（编码器返回空）——保留日志兜底")
-                return false
-            }
-        // SPS/PPS + IDR 拼成一段 AnnexB 一次提交：submitH264 会先发 VideoConfig 再发帧，
-        // 并把这一帧记成 lastIdrNals，空闲保活会持续重发维持显示，直到 CarLife 接管。
-        val sent = submitH264(frame.csd + frame.idr, true)
-        if (sent) {
-            log("VIDEO: 已向车机推送提示帧（${lines.firstOrNull() ?: ""}）")
-        } else {
-            log("VIDEO: 通知帧送出失败（通道可能正在重连）")
-        }
-        return sent
     }
 
     // ---- 编码输出 → 协议封装发送 ----
@@ -996,7 +861,7 @@ class VideoSender(
         // （Audi/DELPHI）按声明画布建解码器后解不出画面（概率性黑屏，2026-10-19 实测）。
         //
         // 取值优先级：
-        //  **车机画布（[canvasSize]）> 引擎码流（[liveSize]）> 构造值 > SPS**，SPS 仅作诊断。
+        //  **车机画布（[canvasSize]）> 构造值 > SPS**，SPS 仅作诊断。
         //
         //  2026-10-25 曾改成「SPS 优先」（理由：声明应等于码流真实尺寸，否则拉伸），
         //  真机复测出问题已回滚。原因：车机是**按 1412×654 建解码器与 surface** 的，
@@ -1008,11 +873,10 @@ class VideoSender(
         //  声明变成 720p ≠ 画布 → 车机建了 720p 解码器 → 整屏黑；而会话、送帧、
         //  写入耗时全部正常，测试台（WinPlay/DiPlay 不校验这几个头字段）照样有画面。
         val canvas = canvasSize?.invoke()
-        val live = liveSize?.invoke()
         val parsed = parseSpsDimensions(sps)
         val spsSane = parsed != null &&
             parsed.first in 320..4096 && parsed.second in 180..2304
-        val (cfgWidth, cfgHeight) = resolveConfigSize(canvas, live, width, height, parsed)
+        val (cfgWidth, cfgHeight) = resolveConfigSize(canvas, width, height, parsed)
         // SPS 诊断**每次发 config 都打**，包括解析失败的情况。
         // 旧实现只在「解析出来且与声明不一致」时打，于是「解析失败」和「恰好一致」
         // 在日志里长得一模一样——排查时无法判断车机在让屏那一刻拿到的 avcC 究竟
@@ -1021,13 +885,13 @@ class VideoSender(
             describeSpsConfig(parsed, cfgWidth to cfgHeight, csdSource, spsSane) +
                 "\n  ↳ SPS ${sps.size}B=" + sps.joinToString(" ") { "%02x".format(it) },
         )
-        val streamSize = live?.takeIf { it.first > 0 && it.second > 0 } ?: (width to height)
+        val streamSize = width to height
         if (!canvasMismatchLogged && (streamSize.first != cfgWidth || streamSize.second != cfgHeight)) {
             canvasMismatchLogged = true
             log(
                 "VIDEO: ⚠ 声明的画布 ${cfgWidth}x$cfgHeight 与码流 ${streamSize.first}x${streamSize.second} 不一致" +
                     "——车机按画布建解码器，画面由车机侧缩放；若仍黑屏，说明这台车要求码流尺寸本身等于画布" +
-                    "（需让 CarLife 引擎按 ${cfgWidth}x$cfgHeight 编码）",
+                    "（需让源端按 ${cfgWidth}x$cfgHeight 编码）",
             )
         }
         val avcc = ByteArrayOutputStream(8 + sps.size + pps.size)
@@ -1359,7 +1223,7 @@ class VideoSender(
          *
          * 等 IDR 是为了不让车机拿新流的 P 帧去参考旧参考帧（那是 0.1 秒被拆的直接原因，
          * 见 `docs/id7-blackscreen-diagnosis.md`）。但**不能无限等**——源若迟迟不出 IDR
-         * （引擎卡住、用户刚进 CarLife 还没开始编码），死等就是永久黑屏。CarLife 的
+         * （源端尚未开始编码），等待可能持续到会话结束。源端的
          * GOP 实测约 2 秒一帧 I，3 秒还没等到说明源有问题，此时放行比死等好：
          * 画面可能花一下，但至少链路还在，下一个 IDR 会自动修正。
          */
@@ -1475,7 +1339,7 @@ class VideoSender(
         /**
          * 决定 VideoConfig 头里声明的画布尺寸（纯函数，便于单测）。
          *
-         * 优先级：车机画布 → 引擎码流 → 构造值 → SPS 解析值。
+         * 优先级：车机画布 → 构造值 → SPS 解析值。
          *
          * 前两级的先后顺序是这个函数的全部意义：真车按声明建解码器，画布是契约；
          * 引擎码流只是「实际编出来多少」，它比画布小的时候（白名单降档）如果拿它
@@ -1483,13 +1347,11 @@ class VideoSender(
          */
         internal fun resolveConfigSize(
             canvas: Pair<Int, Int>?,
-            live: Pair<Int, Int>?,
             fallbackWidth: Int,
             fallbackHeight: Int,
             sps: Pair<Int, Int>?,
         ): Pair<Int, Int> {
             canvas?.let { if (it.first > 0 && it.second > 0) return it }
-            live?.let { if (it.first > 0 && it.second > 0) return it }
             if (fallbackWidth > 0 && fallbackHeight > 0) return fallbackWidth to fallbackHeight
             sps?.let { if (it.first > 0 && it.second > 0) return it }
             return fallbackWidth to fallbackHeight

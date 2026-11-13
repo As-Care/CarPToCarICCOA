@@ -9,7 +9,7 @@
 |---|---|---|
 | `SESSION 保活结束（链路断开）` → `LINK closed` → `BT: 已主动断开当前控制会话` | iAP2 / 蓝牙 RFCOMM | **不是 WiFi**，看下一节 |
 | `WIFI: 系统事件 onLost` → `>>> 车机热点 … 已断开` | wlan0（应用专属网络） | 是网络侧，先看重绑结果 |
-| `VIDEO: 帧 #…` 之后直接没有下文，CarPlay 会话还在 | 帧源（CarLife 引擎） | 画面冻结，不是会话结束 |
+| `VIDEO: 帧 #…` 之后直接没有下文，CarPlay 会话还在 | 帧源（ICCOA 源端） | 画面冻结，不是会话结束 |
 
 2026-11-01 那份 10 分钟日志里 6 次结束**全是第一类**。所以「CarPlay 断链」这个词
 在那份日志里指向蓝牙，而不是 WiFi——这两件事被混在一起，是当时判断卡住的主因。
@@ -42,8 +42,7 @@ WIFI: 车机热点已重新绑定——网络恢复，本轮会话需重建后�
 
 **判定规则只有一条**：断链时刻附近有没有 `WIFI:` 行。
 
-- **没有** → wlan0 那一刻没动过，WiFi 可以排除；去查对端为什么拆链
-  （`docs/audio-channel-watchdog.md` 里的抓包口子）。
+- **没有** → wlan0 那一刻没动过，WiFi 可以排除；去查对端为什么拆链。
 - **有 `onLost`** → 网络真的断了。再看重绑是否成功：
   - 重绑成功 + 几十秒内会话重建 → 是 WiFi 抖动导致的一轮断链，可修（重绑已做，会话自愈还没做）；
   - 重绑失败 / 连续 `onLost` → 热点本身没了（熄火、出范围），属正常终态。
@@ -53,22 +52,18 @@ WIFI: 车机热点已重新绑定——网络恢复，本轮会话需重建后�
 1. **`AUDIO: 同步包发送失败 - ECONNREFUSED`**：这不是断链，是车机 `controlPort`（6011）
    没在监听，ICMP 端口不可达。音频照常出声（那台 MIB3 按 RTP 时间戳排播）。
    1.2.11 起同套接字就地补发一次，日志已不再每秒刷两行。
-2. **`CARLIFE: 实测帧率 27.5fps`（此前 53fps）**：画面静止时编码器本来就少出帧，
+2. **首页「实际发送 27.5 fps」（此前 53fps）**：画面静止时编码器本来就少出帧，
    不能当链路劣化证据。要复现请**别动画面**，静止状态下再看帧率。
 
 ## 四、还想进一步确认时
 
 1. `adb logcat -s WifiClientModeImpl WifiStateMachine`，看断链瞬间有没有
    `DISCONNECTING` / `CONNECTING`——系统侧关联状态机比我们的回调更底层。
-2. **对照实验**：把 CarLife+ 改成 USB 连接（偏好 `carlife_connect_type` 从 5 改成 1）。
-   断链消失 → 单 STA 争抢（CarLife+ 与我们的应用专属网络抢同一条 wlan0）成立；
-   照旧 → 与 WiFi 无关。
-3. `adb shell dumpsys wifi | grep -i "curState\|mNetworkInfo"`，断链前后各抓一次。
+2. `adb shell dumpsys wifi | grep -i "curState\|mNetworkInfo"`，断链前后各抓一次。
 
 ## 五、已知但本版没做的
 
 - **WiFi 抖动后 CarPlay 会话不会自愈**：`onLost` 只重绑网络，不重建会话。
-  自动重建要重新配对/建链，会把 CarLife 引擎再踢一次，风险大于收益，留待实车确认
-  抖动频率后再决定。
+  网络恢复后，由连接流程重新建立 CarPlay 会话。
 - **`AUDIO: 同步包 … ECONNREFUSED` 与 6011 端口的关系**：车机全程不监听是它的实现选择，
   不是我们发错端口（真 iPhone 同期也不会有回包）。

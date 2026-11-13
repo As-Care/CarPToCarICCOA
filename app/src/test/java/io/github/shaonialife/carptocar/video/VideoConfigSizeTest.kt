@@ -23,8 +23,7 @@ class VideoConfigSizeTest {
         val size =
             VideoSender.resolveConfigSize(
                 canvas = 1412 to 654,
-                live = 1280 to 720,
-                fallbackWidth = 1280,
+                    fallbackWidth = 1280,
                 fallbackHeight = 720,
                 sps = 1280 to 720,
             )
@@ -36,8 +35,7 @@ class VideoConfigSizeTest {
         val size =
             VideoSender.resolveConfigSize(
                 canvas = null,
-                live = 1280 to 720,
-                fallbackWidth = 1280,
+                    fallbackWidth = 1280,
                 fallbackHeight = 720,
                 sps = 1280 to 720,
             )
@@ -49,8 +47,7 @@ class VideoConfigSizeTest {
         val size =
             VideoSender.resolveConfigSize(
                 canvas = 0 to 0,
-                live = 1280 to 720,
-                fallbackWidth = 1280,
+                    fallbackWidth = 1280,
                 fallbackHeight = 720,
                 sps = null,
             )
@@ -61,11 +58,11 @@ class VideoConfigSizeTest {
     fun fallsBackToConstructorThenSps() {
         assertEquals(
             1130 to 523,
-            VideoSender.resolveConfigSize(null, null, 1130, 523, 1920 to 1080),
+            VideoSender.resolveConfigSize(null, 1130, 523, 1920 to 1080),
         )
         assertEquals(
             1920 to 1080,
-            VideoSender.resolveConfigSize(null, null, 0, 0, 1920 to 1080),
+            VideoSender.resolveConfigSize(null, 0, 0, 1920 to 1080),
         )
     }
 

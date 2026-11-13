@@ -287,7 +287,7 @@ class VirtualIap2LinkTest {
         durationMs = 180_000,
         status = Iap2NowPlaying.STATUS_PLAYING,
         elapsedMs = elapsedMs,
-        appName = "CarLife+",
+        appName = "Sample Player",
     )
 
     /**
@@ -304,7 +304,7 @@ class VirtualIap2LinkTest {
             h.lastRawFrameOf(0x5001)!!.toList(),
         )
 
-        // 歌名晚到，且不触发任何 MediaSession / CarLife 事件
+        // 歌名晚到，且不触发任何 MediaSession 事件
         h.nowPlaying = song("晚到的歌")
         h.clock += VirtualIap2Link.NOW_PLAYING_POLL_MILLIS
         h.tick()

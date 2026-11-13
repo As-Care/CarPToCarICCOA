@@ -11,7 +11,6 @@ import io.github.shaonialife.carptocar.launcher.VirtualLauncher
 import io.github.shaonialife.carptocar.launcher.settings.DisplayPrefs
 import io.github.shaonialife.carptocar.util.DebugFileLog
 import io.github.shaonialife.carptocar.util.SessionTrace
-import io.github.shaonialife.carptocar.video.FirstFramePolicy
 import io.github.shaonialife.carptocar.video.VideoCanvasMode
 
 /**
@@ -24,17 +23,13 @@ class SenderApp : Application() {
     override fun onCreate() {
         super.onCreate()
         if (getProcessName() != packageName) return
-        if (BuildConfig.CAR_PLUS) {
-            DisplayPrefs.migrateCarPlusStreamSize(this, TargetDevicePrefs.get(this)?.address)
-        }
+        DisplayPrefs.migrateCarPlusStreamSize(this, TargetDevicePrefs.get(this)?.address)
         // 会话日志起点标记：日志文件跨进程累积（2MB 上限），导出默认只取本次启动
         // 之后的部分。必须在这里写（Application 是进程最早入口），晚于任何业务日志
         // 都会让它被算进「历史」。
         DebugFileLog.markSessionStart(this)
         // VideoConfig 画布声明模式（车机画布 / 码流尺寸）——会话建立时读一次
         VideoCanvasMode.load(this)
-        // 首帧策略（缓存关键帧立即起播 / 等引擎当期 IDR）——attach 时读一次
-        FirstFramePolicy.load(this)
         // 完整会话报文录制（files/session_trace.log）：与上面的过程日志分开两份文件，
         // 原因见 SessionTrace 注释（报文量大会挤掉过程日志）。必须在业务起来之前 attach。
         SessionTrace.attach(this)

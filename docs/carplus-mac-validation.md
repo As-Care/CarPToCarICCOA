@@ -1,22 +1,19 @@
 # ICCOA Car+ 在 Mac 上的验证
 
-Car+ 实验构建使用独立包名 `io.github.shaonialife.carptocar.carplus` 和调试签名。接收端 SDK 把 ICCOA 会话画面解码到 Android Surface，现有 `VideoSender` 将该 Surface 的内容编码成 H.264，再经 CarPlay 屏幕通道发送。SDK 在 `:iccoa` 进程运行，通过 Binder 接收 Surface，避免 CarPlay 绑定本进程 Wi-Fi 时改变 ICCOA 的默认路由。首版验证范围是视频，画布为 1280×720、30 fps。
+ICCOA 构建使用包名 `io.github.shaonialife.carptocar.carplus` 和调试签名。SDK 在独立的 `:iccoa` 进程中运行。视频优先走 H.264 直通，兼容回退使用 Surface 解码与重新编码。
 
 ## 本地编译与单测
 
-需要 JDK 17、Gradle 8.10.2、Android SDK 36（Car+）和 Android SDK 34（CarLife）。Car+ 清单显式启用 Android 的 16 KB 页面兼容模式，以运行 SDK 附带的原生库。由于仓库 Wrapper 指向 Windows 路径，`GRADLE` 请设为本机 Gradle 8.10.2 的绝对路径，并用 `local.properties` 配置 `sdk.dir`。可通过 `-Dorg.gradle.java.home="$JAVA_HOME"` 覆盖项目的 Windows JDK 路径。
+需要 JDK 17、Gradle 8.10.2、Android SDK 36。Car+ 清单显式启用 Android 的 16 KB 页面兼容模式，以运行 SDK 附带的原生库。由于仓库 Wrapper 指向 Windows 路径，`GRADLE` 请设为本机 Gradle 8.10.2 的绝对路径，并用 `local.properties` 配置 `sdk.dir`。可通过 `-Dorg.gradle.java.home="$JAVA_HOME"` 覆盖项目的 Windows JDK 路径。
 
 ```sh
-"$GRADLE" -Dorg.gradle.java.home="$JAVA_HOME" \
-  :app:testDebugUnitTest :app:assembleDebug
-
 curl -fL https://raw.githubusercontent.com/PiggyBackBayonet/MiAuto/v0.1.1/app/stubs/icar-sdk-stubs.jar \
   -o /tmp/icar-sdk-stubs.jar
 printf '%s  %s\n' 224fc1f5014f50a8f1670eb42f3c80625a2978ba5299fde2480a3c49eee2c242 \
   /tmp/icar-sdk-stubs.jar | shasum -a 256 -c
 
 "$GRADLE" -Dorg.gradle.java.home="$JAVA_HOME" \
-  -PcarPlus=true -PcarPlusSdkStubs=/tmp/icar-sdk-stubs.jar \
+  -PcarPlusSdkStubs=/tmp/icar-sdk-stubs.jar \
   :app:testDebugUnitTest :app:assembleDebug :app:assembleDebugAndroidTest
 ```
 
@@ -34,7 +31,7 @@ adb -s emulator-5560 shell am instrument -w \
   io.github.shaonialife.carptocar.carplus.test/androidx.test.runner.AndroidJUnitRunner
 ```
 
-测试用 Android 解码器把样例 H.264 解码到 `VideoSender` 的输入 Surface。本地 TCP 接收端检查 1412×654 的车机画布声明和 AVC 配置，并用会话密钥验证三个发送帧都能解密为带长度前缀的 H.264 NAL。样例是 FFmpeg 生成的六帧 1280×720 蓝底视频。
+回环测试分别将样例 H.264 送进 ICCOA 直通接收端，以及解码到 `VideoSender` 的输入 Surface 验证兼容回退。本地 TCP 接收端检查 1412×654 的车机画布声明和 AVC 配置，并用会话密钥验证三个发送帧都能解密为带长度前缀的 H.264 NAL。样例是 FFmpeg 生成的六帧 1280×720 蓝底视频。
 
 ## 打包单 APK 真机测试版
 
@@ -43,7 +40,7 @@ adb -s emulator-5560 shell am instrument -w \
 在当前 Mac 上，从工作树根目录执行。将 `RUNTIME` 指到本机保存 DEX、`assets/ccd.data` 和 `jni/arm64-v8a/` 的目录。该任务需要 Python 3 和 Android Build-Tools 34.0.0。
 
 ```sh
-"$GRADLE" -Dorg.gradle.java.home="$JAVA_HOME" -PcarPlus=true \
+"$GRADLE" -Dorg.gradle.java.home="$JAVA_HOME" \
   -PcarPlusSdkStubs="$RUNTIME/../icar-sdk-stubs.jar" \
   -PcarPlusSdkDex="$RUNTIME/icar-sdk.dex" \
   -PcarPlusSdkAssets="$RUNTIME/assets" \
@@ -71,7 +68,7 @@ python3 scripts/carplus-relay/prepare.py "$ANDROID_HOME" "$JAVA_HOME/bin/javac" 
 
 ```sh
 "$GRADLE" -Dorg.gradle.java.home="$JAVA_HOME" \
-  -PcarPlus=true -PcarPlusSdk=/absolute/path/receiver.aar \
+  -PcarPlusSdk=/absolute/path/receiver.aar \
   -PcarPlusSdkAssets=/absolute/path/sdk-assets :app:packageCarPlusRuntime
 ```
 

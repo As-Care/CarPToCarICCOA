@@ -32,7 +32,6 @@ val keystoreProps =
         if (keystorePropsFile.exists()) keystorePropsFile.inputStream().use { load(it) }
     }
 val hasReleaseKeystore = keystoreProps.getProperty("storeFile") != null
-val carPlus = providers.gradleProperty("carPlus").map(String::toBoolean).getOrElse(false)
 val carPlusSdk = providers.gradleProperty("carPlusSdk").orNull?.let { rootProject.file(it) }
 val carPlusSdkDex = providers.gradleProperty("carPlusSdkDex").orNull?.let { rootProject.file(it) }
 val carPlusSdkStubs = providers.gradleProperty("carPlusSdkStubs").orNull?.let { rootProject.file(it) }
@@ -41,51 +40,48 @@ val carPlusSdkJni = providers.gradleProperty("carPlusSdkJni").orNull?.let { root
 val carPlusRelayAssets = providers.gradleProperty("carPlusRelayAssets").orNull?.let { rootProject.file(it) }
 val carPlusAudioRelay = carPlusSdkDex != null && carPlusRelayAssets != null
 val carPlusVideoRelay = carPlusSdkDex != null
-val carPlusRuntime = carPlus && (carPlusSdk != null || carPlusSdkDex != null)
+val carPlusRuntime = carPlusSdk != null || carPlusSdkDex != null
 val carPlusDebuggable = providers.gradleProperty("carPlusDebuggable").map(String::toBoolean).getOrElse(!carPlusRuntime)
 val carPlusApkName = "CarPToCar+ICCOA.apk"
-if (carPlus) {
-    require(carPlusSdk == null || carPlusSdkDex == null) {
-        "Choose one Car+ runtime input: an AAR or a DEX with SDK stubs"
-    }
-    require(carPlusSdk?.let { it.isFile && it.extension == "aar" } ?: (carPlusSdkStubs?.isFile == true)) {
-        "Car+ needs -PcarPlusSdk=/path/to/receiver.aar or -PcarPlusSdkStubs=/path/to/icar-sdk-stubs.jar"
-    }
-    require(carPlusSdkAssets == null || carPlusRuntime && carPlusSdkAssets.resolve("ccd.data").isFile) {
-        "-PcarPlusSdkAssets requires a Car+ runtime and an assets directory containing ccd.data"
-    }
-    if (carPlusSdkDex != null) {
-        require(carPlusSdkDex.isFile && carPlusSdkDex.extension == "dex" && carPlusSdkAssets != null) {
-            "-PcarPlusSdkDex requires a DEX file and -PcarPlusSdkAssets containing ccd.data"
-        }
-    }
-    require(carPlusSdkJni == null || carPlusRuntime && carPlusSdkJni.isDirectory) {
-        "-PcarPlusSdkJni requires a Car+ runtime and a directory with ABI subdirectories"
-    }
-    require(carPlusRelayAssets == null || carPlusRuntime &&
-        listOf("injector", "relay.js", "client.dex", "server.dex", "COPYING").all {
-            carPlusRelayAssets.resolve("iccoa-relay/$it").isFile
-        }) {
-        "-PcarPlusRelayAssets must contain the prepared ICCOA relay assets"
-    }
-    layout.buildDirectory.set(layout.projectDirectory.dir("build/carplus"))
+require(carPlusSdk == null || carPlusSdkDex == null) {
+    "Choose one Car+ runtime input: an AAR or a DEX with SDK stubs"
 }
+require(carPlusSdk?.let { it.isFile && it.extension == "aar" } ?: (carPlusSdkStubs?.isFile == true)) {
+    "Car+ needs -PcarPlusSdk=/path/to/receiver.aar or -PcarPlusSdkStubs=/path/to/icar-sdk-stubs.jar"
+}
+require(carPlusSdkAssets == null || carPlusRuntime && carPlusSdkAssets.resolve("ccd.data").isFile) {
+    "-PcarPlusSdkAssets requires a Car+ runtime and an assets directory containing ccd.data"
+}
+if (carPlusSdkDex != null) {
+    require(carPlusSdkDex.isFile && carPlusSdkDex.extension == "dex" && carPlusSdkAssets != null) {
+        "-PcarPlusSdkDex requires a DEX file and -PcarPlusSdkAssets containing ccd.data"
+    }
+}
+require(carPlusSdkJni == null || carPlusRuntime && carPlusSdkJni.isDirectory) {
+    "-PcarPlusSdkJni requires a Car+ runtime and a directory with ABI subdirectories"
+}
+require(carPlusRelayAssets == null || carPlusRuntime &&
+    listOf("injector", "relay.js", "client.dex", "server.dex", "COPYING").all {
+        carPlusRelayAssets.resolve("iccoa-relay/$it").isFile
+    }) {
+    "-PcarPlusRelayAssets must contain the prepared ICCOA relay assets"
+}
+layout.buildDirectory.set(layout.projectDirectory.dir("build/carplus"))
 
 android {
     namespace = "io.github.shaonialife.carptocar"
-    compileSdk = if (carPlus) 36 else 34
+    compileSdk = 36
 
     defaultConfig {
-        applicationId = if (carPlus) "io.github.shaonialife.carptocar.carplus" else "io.github.shaonialife.carptocar"
+        applicationId = "io.github.shaonialife.carptocar.carplus"
         minSdk = 31
         targetSdk = 34
         versionCode = appVersionCode
         versionName = appVersionName
-        buildConfigField("boolean", "CAR_PLUS", carPlus.toString())
         buildConfigField("boolean", "CAR_PLUS_RUNTIME", carPlusRuntime.toString())
         buildConfigField("boolean", "CAR_PLUS_AUDIO_RELAY", carPlusAudioRelay.toString())
         buildConfigField("boolean", "CAR_PLUS_VIDEO_RELAY", carPlusVideoRelay.toString())
-        if (carPlus) manifestPlaceholders["carPlusRuntime"] = carPlusRuntime.toString()
+        manifestPlaceholders["carPlusRuntime"] = carPlusRuntime.toString()
         ndk {
             abiFilters += listOf("arm64-v8a")
         }
@@ -113,32 +109,23 @@ android {
         debug {
             // **不要加 applicationIdSuffix**：本项目 debug 包就是日常使用的包——
             // Shizuku 授权是按包名授予的，改包名会要求重新授权。
-            if (carPlus) {
-                // ColorOS checks ELF alignment on 4 KB phones for debuggable APKs.
-                isDebuggable = carPlusDebuggable
-            }
-            versionNameSuffix =
-                when {
-                    !carPlus -> "-debug"
-                    carPlusDebuggable -> "-carplus-debug"
-                    else -> "-carplus"
-                }
+            // ColorOS checks ELF alignment on 4 KB phones for debuggable APKs.
+            isDebuggable = carPlusDebuggable
+            versionNameSuffix = if (carPlusDebuggable) "-carplus-debug" else "-carplus"
         }
     }
 
-    sourceSets["main"].java.srcDir(if (carPlus) "src/carPlus/java" else "src/carLife/java")
-    if (carPlus) {
-        sourceSets["debug"].manifest.srcFile("src/carPlus/AndroidManifest.xml")
-        sourceSets["debug"].res.srcDir("src/carPlus/res")
-        carPlusSdkAssets?.let { sourceSets["debug"].assets.srcDir(it) }
-        carPlusRelayAssets?.let { sourceSets["debug"].assets.srcDir(it) }
-        carPlusSdkJni?.let { sourceSets["debug"].jniLibs.srcDir(it) }
-        sourceSets["androidTest"].java.srcDir("src/carPlusTest/java")
-        sourceSets["androidTest"].assets.srcDir("src/carPlusTest/assets")
-        defaultConfig.testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
-    }
+    sourceSets["main"].java.srcDir("src/carPlus/java")
+    sourceSets["debug"].manifest.srcFile("src/carPlus/AndroidManifest.xml")
+    sourceSets["debug"].res.srcDir("src/carPlus/res")
+    carPlusSdkAssets?.let { sourceSets["debug"].assets.srcDir(it) }
+    carPlusRelayAssets?.let { sourceSets["debug"].assets.srcDir(it) }
+    carPlusSdkJni?.let { sourceSets["debug"].jniLibs.srcDir(it) }
+    sourceSets["androidTest"].java.srcDir("src/carPlusTest/java")
+    sourceSets["androidTest"].assets.srcDir("src/carPlusTest/assets")
+    defaultConfig.testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     packaging {
-        if (carPlus && carPlusSdkDex != null) jniLibs.useLegacyPackaging = true
+        if (carPlusSdkDex != null) jniLibs.useLegacyPackaging = true
         resources {
             excludes += listOf(
                 "org/bouncycastle/pqc/**",
@@ -177,7 +164,7 @@ android {
 
 androidComponents {
     beforeVariants(selector().withBuildType("release")) { variant ->
-        if (carPlus) variant.enable = false
+        variant.enable = false
     }
 }
 
@@ -230,16 +217,14 @@ dependencies {
     // AirPlay 配对密码学：X25519/Ed25519/ChaCha20-Poly1305/HKDF-SHA512
     implementation("org.bouncycastle:bcprov-jdk18on:1.78.1")
 
-    if (carPlus) {
-        androidTestImplementation("androidx.test:runner:1.5.2")
-        androidTestImplementation("androidx.test.ext:junit:1.1.5")
-        if (carPlusSdk != null) {
-            implementation(files(carPlusSdk))
-        } else {
-            compileOnly(files(checkNotNull(carPlusSdkStubs)))
-        }
-        if (carPlusRuntime) implementation("androidx.room:room-runtime:2.4.3")
+    androidTestImplementation("androidx.test:runner:1.5.2")
+    androidTestImplementation("androidx.test.ext:junit:1.1.5")
+    if (carPlusSdk != null) {
+        implementation(files(carPlusSdk))
+    } else {
+        compileOnly(files(checkNotNull(carPlusSdkStubs)))
     }
+    if (carPlusRuntime) implementation("androidx.room:room-runtime:2.4.3")
 
     testImplementation("junit:junit:4.13.2")
 }

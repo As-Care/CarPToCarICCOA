@@ -1,15 +1,6 @@
-package io.github.shaonialife.carptocar.carlife
+package io.github.shaonialife.carptocar.video
 
-/**
- * 极简 H.264 SPS 解析：只为拿到**码流真实的编码宽高**。
- *
- * 为什么需要它：触摸坐标是回灌给手机 CarLife 引擎的，坐标系必须是**引擎实际编码的画面**。
- * 而 `98311` 申请值 / `65544` 回包值都可能与实际码流不一致（引擎有白名单档位：
- * 申请 1412×654 也可能按 1280×720 编码），一旦拿错基准，等比缩放系数就偏，
- * 车机点哪儿都落不到实处。SPS 是码流自带的真相，只信它。
- *
- * 只实现 AnnexB + 常见 profile（Baseline/Main/High 及其变体），足够覆盖 CarLife 的 H.264。
- */
+/** Reads encoded dimensions from a H.264 SPS for video passthrough compatibility checks. */
 internal object H264Sps {
 
     /** 从**单个 SPS NAL**（首字节是 NAL 头 0x67，不含起始码）解析宽高。 */
@@ -23,46 +14,6 @@ internal object H264Sps {
         }.getOrNull()
     }
 
-    /** 从 AnnexB 字节流里找 SPS 并解析。返回 null = 没找到或解析失败。 */
-    fun parseAnnexB(data: ByteArray): Pair<Int, Int>? {
-        var index = 0
-        while (index + 5 < data.size) {
-            // 找 00 00 01（三字节起始码）或 00 00 00 01
-            if (data[index] != 0.toByte() || data[index + 1] != 0.toByte()) {
-                index++
-                continue
-            }
-            val scLength = when {
-                data[index + 2] == 1.toByte() -> 3
-                index + 3 < data.size && data[index + 2] == 0.toByte() &&
-                    data[index + 3] == 1.toByte() -> 4
-                else -> {
-                    index++
-                    continue
-                }
-            }
-            val nalStart = index + scLength
-            if (nalStart >= data.size) return null
-            val nalType = data[nalStart].toInt() and 0x1F
-            if (nalType == 7) {
-                // SPS 到下一个起始码为止
-                var end = nalStart + 1
-                while (end + 2 < data.size) {
-                    if (data[end] == 0.toByte() && data[end + 1] == 0.toByte() &&
-                        (data[end + 2] == 1.toByte() || data[end + 2] == 0.toByte())
-                    ) {
-                        break
-                    }
-                    end++
-                }
-                return parseNal(data.copyOfRange(nalStart, end))
-            }
-            index = nalStart + 1
-        }
-        return null
-    }
-
-    /** 去掉 00 00 03 → 00 00 的防竞争字节。 */
     private fun stripEmulation(
         src: ByteArray,
         from: Int,

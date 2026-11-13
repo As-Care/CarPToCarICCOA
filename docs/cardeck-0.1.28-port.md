@@ -61,7 +61,6 @@
 内核默认要 **2 小时**才探测：车机熄火 / 走出热点时链路常不发 RST，读线程会一直挂着——画面冻结、
 会话看门狗不触发。19s 刻意大于车机 15s 的 AirPlay 看门狗，避免我们比车机更早判死正常会话。
 
-CarLife 侧（`CarLifeHuClient`）连的是本机端口，不涉及网络闪断，故不设。
 
 ## 验证
 
@@ -84,11 +83,9 @@ CarLife 侧（`CarLifeHuClient`）连的是本机端口，不涉及网络闪断�
 ```
 git log --oneline abd1cf9..HEAD            # main → bieke 共 9 笔
 git log --oneline abd1cf9..HEAD -- app/src/main/java/io/github/shaonialife/carptocar/audio \
-                                   app/src/main/java/io/github/shaonialife/carptocar/carlife/CarLifeAudioSink.kt
 # → 空
 ```
 
-结论：`audio/` 全目录与 `CarLifeAudioSink` 在这 9 笔里**零改动**，1.0.11 与 1.0.7(main)
 的音频代码逐字相同。音频数据面是 `DatagramSocket`（UDP RTP），与 TCP keepalive 无关。
 
 **但有一处物理交集，已撤**
@@ -105,9 +102,3 @@ git log --oneline abd1cf9..HEAD -- app/src/main/java/io/github/shaonialife/carpt
 视频数据口的 keepalive 保留（纯视频单向写，与音频无交集）。
 
 **版本**：1.0.12（10012），208 用例全绿，`dist/CarPToCarL-1.0.12-audio-safe.apk`。
-
-**若复测仍无声**，按 `docs/audio-call-issues.md` 的三行日志判读，不要再猜代码：
-
-1. `AIRPLAY: ✓ 音频流协商成功 … dataPort=…` —— 没有则音频 SETUP 被拒（换档位问题）；
-2. `AUDIO: 首帧` 与 `CARLIFE: 媒体 音频格式宣告` —— 没有则 CarLife 引擎没推 PCM（导航播报不一定能唤醒引擎）；
-3. `CARLIFE: 音乐会话暂停——丢弃引擎残留 PCM` 连续出现 —— 导航被 15s 暂停窗口吞掉（那才需要动音频代码）。

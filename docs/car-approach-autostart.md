@@ -83,7 +83,7 @@
 
 根因：整条管线不止 iAP2 拨号，还有
 
-- CarLife 劫持（7240 端口监听/接管）；
+- ICCOA 接收端与后台重连；
 - 虚拟屏与编码器（MediaProjection 授权、虚拟显示器创建）；
 - 启动自检 `detectResidualDisplays()`（清残留虚拟屏）；
 - 权限门禁（通知、蓝牙、悬浮窗、录屏授权）。

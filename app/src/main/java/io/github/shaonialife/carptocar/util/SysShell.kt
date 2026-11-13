@@ -10,7 +10,7 @@ import java.util.concurrent.TimeUnit
  * 能力很强但要求用户额外装 Shizuku 并授权——一旦未就绪，整个连接流程会被门禁拦住。
  * 2026-10-24 起 Shizuku 依赖整体移除：本类退化为普通 `ProcessBuilder`，
  * **没有 shell 权限时命令必然失败**（exitCode != 0），所有调用点都按「失败即降级」
- * 处理，不会抛异常、不影响 CarPlay / CarLife 主链路。
+ * 处理，不会抛异常、不影响 ICCOA 与 CarPlay 主链路。
  *
  * 仍然保留 [mainThreadViolations] 与 [violationSink]：shell 是阻塞调用，
  * 主线程串几条就会 ANR，这类问题只在真机暴露，必须进文件日志。

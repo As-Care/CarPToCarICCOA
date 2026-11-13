@@ -31,14 +31,12 @@ import android.widget.FrameLayout
 import android.widget.ImageView
 import android.widget.LinearLayout
 import android.widget.RadioGroup
-import android.widget.SeekBar
 import android.widget.TextView
 import android.widget.Toast
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AppCompatActivity
 import androidx.appcompat.widget.SwitchCompat
 import androidx.core.content.ContextCompat
-import androidx.core.graphics.drawable.DrawableCompat
 import io.github.shaonialife.carptocar.bt.AppUiPresence
 import io.github.shaonialife.carptocar.bt.BtCompatPrefs
 import io.github.shaonialife.carptocar.bt.BtProfiles
@@ -47,11 +45,9 @@ import io.github.shaonialife.carptocar.bt.CarApproachReceiver
 import io.github.shaonialife.carptocar.bt.CarIdleGuard
 import io.github.shaonialife.carptocar.bt.CarIdlePolicy
 import io.github.shaonialife.carptocar.bt.TargetDevicePrefs
-import io.github.shaonialife.carptocar.carlife.CarLifeHijack
 import io.github.shaonialife.carptocar.carplus.CarPlusReceiver
 import io.github.shaonialife.carptocar.carplus.CarPlusVideo
 import io.github.shaonialife.carptocar.input.CarInputClient
-import io.github.shaonialife.carptocar.input.TouchRouter
 import io.github.shaonialife.carptocar.launcher.VirtualLauncher
 import io.github.shaonialife.carptocar.launcher.settings.AppOrientationCompat
 import io.github.shaonialife.carptocar.launcher.settings.AutoConnectPrefs
@@ -62,7 +58,6 @@ import io.github.shaonialife.carptocar.legal.DisclaimerPrefs
 import io.github.shaonialife.carptocar.legal.needsDisclaimerAtLaunch
 import io.github.shaonialife.carptocar.ui.DarkMessageDialog
 import io.github.shaonialife.carptocar.ui.PanelWindow
-import io.github.shaonialife.carptocar.ui.ScreenDimmer
 import io.github.shaonialife.carptocar.ui.SignalWavesView
 import io.github.shaonialife.carptocar.util.AppVersion
 import io.github.shaonialife.carptocar.util.Bg
@@ -72,7 +67,6 @@ import io.github.shaonialife.carptocar.util.DeviceIdentity
 import io.github.shaonialife.carptocar.util.LogDisplayLevel
 import io.github.shaonialife.carptocar.util.LogExporter
 import io.github.shaonialife.carptocar.util.SysShell
-import io.github.shaonialife.carptocar.video.StreamFps
 import io.github.shaonialife.carptocar.video.VideoSender
 import java.util.Locale
 import kotlin.math.roundToInt
@@ -135,7 +129,6 @@ class MainActivity : AppCompatActivity() {
     private lateinit var reconnectCarPlusButton: View
     private lateinit var ctaIcon: ImageView
     private lateinit var ctaLabel: TextView
-    private lateinit var audioTag: TextView
     private lateinit var readyBluetooth: TextView
     private lateinit var readyWifi: TextView
     private lateinit var ssidInput: EditText
@@ -152,7 +145,7 @@ class MainActivity : AppCompatActivity() {
     private lateinit var switchLog: androidx.appcompat.widget.SwitchCompat
     private lateinit var logText: TextView
     private var logIssuesOnly = false
-    private lateinit var carLifeStatus: TextView
+    private lateinit var carPlusStatus: TextView
     private lateinit var snackbar: TextView
 
     // ---- 英雄卡状态机（1s 轮询 SessionController 对账）----
@@ -363,7 +356,7 @@ class MainActivity : AppCompatActivity() {
             return
         }
         if (!DisclaimerPrefs.hasAcceptedCurrent(this)) return
-        if (BuildConfig.CAR_PLUS && (!BuildConfig.CAR_PLUS_RUNTIME || !hasCarPlusPermissions())) return
+        if (!BuildConfig.CAR_PLUS_RUNTIME || !hasCarPlusPermissions()) return
         if (startupCheckRunning || pendingResidualDisplays != null) return
         if (SessionController.isSessionRunning() || SessionController.sessionStarting.get()) return
         if (heroState != HeroState.IDLE) return
@@ -695,7 +688,7 @@ class MainActivity : AppCompatActivity() {
      * 「启动连接」放行检查。
      *
      * 旧实现这里是 Shizuku 硬门禁（虚拟屏/注入都靠它）。2026-10-24 起 Shizuku 依赖
-     * 整体移除，画面唯一来源是本机 CarLife 直通。
+     * 画面来自本机 ICCOA 接收端。
      *
      * 2026-10-26 起这里加了**本机蓝牙地址硬门禁**：地址是整个链路的设备身份
      * （0x4300/0x4E0E、AirPlay SETUP、ctrl 广播 id 都用它），没有它连上去接收端
@@ -706,7 +699,7 @@ class MainActivity : AppCompatActivity() {
      * 蓝牙/位置权限授权后续跑）都汇到这一个函数，改一处即可全覆盖。
      */
     private fun proceedToConnect(onReady: () -> Unit) {
-        if (BuildConfig.CAR_PLUS && !BuildConfig.CAR_PLUS_RUNTIME) {
+        if (!BuildConfig.CAR_PLUS_RUNTIME) {
             snack(CarPlusReceiver.status)
             return
         }
@@ -841,7 +834,7 @@ class MainActivity : AppCompatActivity() {
         }
 
         deviceSubtitle = findViewById(R.id.deviceSubtitle)
-        carLifeStatus = findViewById(R.id.carLifeStatus)
+        carPlusStatus = findViewById(R.id.carPlusStatus)
         supportsSystemCarPlus = CarPlusReceiver.hasSystemCarPlus(this)
         findViewById<View>(R.id.openSystemCarPlus).apply {
             if (supportsSystemCarPlus) {
@@ -849,15 +842,7 @@ class MainActivity : AppCompatActivity() {
                 setOnClickListener { openSystemCarPlus() }
             }
         }
-        // 状态行兼作「重启守候」入口：不拉起任何应用，只是重新开始盯 7240 端口
-        carLifeStatus.setOnClickListener {
-            if (BuildConfig.CAR_PLUS) {
-                startCarPlusReceiver(refresh = true)
-            } else if (!CarLifeHijack.isActive) {
-                log("CARLIFE: 手动重启守候（等待你打开 CarLife+ 的无线连接）")
-                CarLifeHijack.prewarm(applicationContext) { line -> runOnUiThread { log(line) } }
-            }
-        }
+        carPlusStatus.setOnClickListener { startCarPlusReceiver(refresh = true) }
         signalWaves = findViewById(R.id.signalWaves)
         hubPlate = findViewById(R.id.hubPlate)
         hubCar = findViewById(R.id.hubCar)
@@ -875,7 +860,6 @@ class MainActivity : AppCompatActivity() {
         reconnectCarPlusButton = findViewById(R.id.btnReconnectCarPlus)
         ctaIcon = findViewById(R.id.ctaIcon)
         ctaLabel = findViewById(R.id.ctaLabel)
-        audioTag = findViewById(R.id.audioTag)
         readyBluetooth = findViewById(R.id.readyBluetooth)
         readyWifi = findViewById(R.id.readyWifi)
         ssidInput = findViewById(R.id.ssidInput)
@@ -1032,7 +1016,7 @@ class MainActivity : AppCompatActivity() {
         }
         // 静默触发：界面建好就走（等同按 Home），连接与状态交给通知栏。
         //
-        // 为什么不是「干脆不建界面」：整条管线（CarLife 接管、虚拟屏/编码器、启动自检）
+        // 为什么不是「干脆不建界面」：启动自检和连接界面
         // 都挂在 Activity 这一路上，绕开界面直接连，握手能过但**车机端收不到数据**
         // （1.2.2 实车结论）。所以先让界面完整建起来，再退到后台——和用户连上后按 Home
         // 是同一种状态。
@@ -1109,7 +1093,7 @@ class MainActivity : AppCompatActivity() {
 
         // ---- 连接准备 ----
         // 启动后自动连接：默认开启。打开 App 即发起连接，不必每次点英雄卡；
-        // 需要在连之前改「下次连接起效」的项（分辨率缩放 / CarLife 劫持开关）时关掉它。
+        // 需要在连之前改「下次连接起效」的项（如分辨率）时关掉它。
         val autoConnectNote = findViewById<TextView>(R.id.autoConnectNote)
         val switchAutoConnect = findViewById<androidx.appcompat.widget.SwitchCompat>(R.id.switchAutoConnect)
         switchAutoConnect.isChecked = AutoConnectPrefs.enabled(this)
@@ -1270,11 +1254,6 @@ class MainActivity : AppCompatActivity() {
             refreshMacGate()
         }
 
-        // 「画质增强」（写 CarLife 官方调试配置）入口已按用户要求从首页移除：
-        // 实测这条 MediaFormat 通道对码率/帧率无效，而 /sdcard/BaiduCarlife/vehicle
-        // 一存在就会让 CarLife 进入调试模式，白担开销。CarLifeDevConfig 保留备用
-        // （需要时可在代码里直接调用 provision()），界面不再暴露。
-
         findViewById<TextView>(R.id.btnWifi).setOnClickListener {
             val ssid = ssidInput.text.toString().trim()
             // 自动加入不可用时的手动兜底：密码先进剪贴板，系统 WLAN 页粘贴即可
@@ -1350,48 +1329,20 @@ class MainActivity : AppCompatActivity() {
             true
         }
 
-        if (!BuildConfig.CAR_PLUS &&
-            ContextCompat.checkSelfPermission(this, Manifest.permission.BLUETOOTH_CONNECT) !=
-                PackageManager.PERMISSION_GRANTED
-        ) {
-            permissionLauncher.launch(Manifest.permission.BLUETOOTH_CONNECT)
-        }
-
         // 通知使用权（媒体会话枚举，音乐卡数据源）：Shizuku 移除后没有静默授予通道，
         // 需要用户自己在系统设置里打开；这里不再阻塞启动。
 
         // ---- 显示设置（原「显示」面板迁移至首页，2026-10-24） ----
         bindDisplayCard()
 
-        // 常亮+暗幕：界面开关已移除，行为固定为「默认开启」，由会话起停驱动
-        // （ScreenDimmer 由 VirtualLauncher.attach 在会话启动时挂载）。
-        ScreenDimmer.enabled = true
-
-        TouchRouter.logSink = { line -> log(line) }
         VirtualLauncher.logSink = { line -> log(line) }
         CarInputClient.logSink = { line -> log(line) }
 
-        // 启动即开始守候 CarLife 端口 —— 车机画面的唯一来源（隐形屏已按用户要求移除）。
-        // **不自动拉起 CarLife+**：由用户手动打开它并点「无线连接」，端口一开即接管。
-        if (BuildConfig.CAR_PLUS) {
-            log("ICCOA: 打开应用后自动启动接收端，可点首页画面来源状态行重试")
-        } else if (CarLifeHijack.isEnabled(this)) {
-            mainHandler.postDelayed(
-                {
-                    CarLifeHijack.prewarm(applicationContext) { line ->
-                        runOnUiThread { log(line) }
-                    }
-                },
-                800L,
-            )
-        } else {
-            log("CARLIFE: 本地劫持已在设置里关闭——本轮不会有车机画面")
-        }
+        log("ICCOA: 打开应用后自动启动接收端，可点首页画面来源状态行重试")
 
         // 版本号走运行时读取：BuildConfig.VERSION_NAME 会被 Kotlin 折叠成字面量，
         // 改版本号后增量编译不重编本类时，日志会印上一版的号（1.2.13 踩过一次）。
-        val source = if (BuildConfig.CAR_PLUS) "ICCOA Car+ 视频" else "本地劫持 CarLife · 音频=PCM 直通"
-        log("${getString(R.string.app_name)} ${AppVersion.nameWithTag(this)}（画面=$source）就绪")
+        log("${getString(R.string.app_name)} ${AppVersion.nameWithTag(this)}（画面=ICCOA Car+ 视频）就绪")
         log("真车：与车机蓝牙配对 + 手机加入车机热点 -> 点「启动连接」（自动主动连入车机）")
         log("测试台：两台手机蓝牙配对 -> 备用机跑 xcertplay 无线模式 -> 点「启动连接」等待回连")
         // 接收端（WinPlay 等）按真实蓝牙地址过滤设备：解析不到就等于注定 SETUP 403，
@@ -1440,36 +1391,18 @@ class MainActivity : AppCompatActivity() {
 
     // ==================== 英雄卡状态机 ====================
 
-    /**
-     * 刷新「CarLife 劫持」状态行。
-     *
-     * 车机画面只有一个来源：手机原生 CarLife+ 的 H.264 直通。所以这行文案就是
-     * 排障的第一现场——用户不用展开日志就能看出卡在「没拉起 / 没进无线连接 /
-     * 已劫持没连车机 / 正在推流」哪一步。
-     */
-    private fun updateCarLifeStatus() {
-        val text =
-            when {
-                BuildConfig.CAR_PLUS -> if (heroVideoSender?.let(SessionController::isCarPlusPictureReady) == true) {
-                    "CarPlay 正在接收 ICCOA Car+ 画面"
-                } else {
-                    CarPlusReceiver.status
-                }
-                !CarLifeHijack.isEnabled(this) -> "CarLife 劫持已在设置里关闭 —— 不会有车机画面"
-                // 判定一律以「真实视频流」为准（用户明确要求）：帧真正写进车机通道才算在投，
-                // 不认 CarLife 进程/握手状态——否则会出现「显示已劫持、车机却在等视频」的误判。
-                SessionController.videoSender?.isVideoFlowing == true -> "车机画面来自 CarLife+（视频流正常）"
-                CarLifeHijack.isAttached -> "已接管 CarLife+，但暂无视频流送达车机"
-                CarLifeHijack.sourceActive -> "已劫持 CarLife+ 画面 —— 点「启动连接」推到车机"
-                CarLifeHijack.isActive -> "已连上 CarLife+，等待它开始推流"
-                else -> "等待你手动打开 CarLife+ 并点「无线连接」—— 点此重启守候"
-            }
-        if (carLifeStatus.text != text) carLifeStatus.text = text
+    private fun updateCarPlusStatus() {
+        val text = if (heroVideoSender?.let(SessionController::isCarPlusPictureReady) == true) {
+            "CarPlay 正在接收 ICCOA Car+ 画面"
+        } else {
+            CarPlusReceiver.status
+        }
+        if (carPlusStatus.text != text) carPlusStatus.text = text
     }
 
     private fun tickHero() {
         val sender = SessionController.videoSender?.takeIf {
-            it.isRunning && (!BuildConfig.CAR_PLUS || SessionController.currentClient?.isRetired != true)
+            it.isRunning && SessionController.currentClient?.isRetired != true
         }
         if (sender !== heroVideoSender) {
             heroVideoSender = sender
@@ -1493,7 +1426,7 @@ class MainActivity : AppCompatActivity() {
         // 连接中：副标题跟随阶段提示（英雄卡内即可见，不必划到底部看日志）
         if (s == HeroState.CONNECTING) {
             heroSubline.text = connectingMessage()
-        } else if (BuildConfig.CAR_PLUS && s == HeroState.IDLE && !startupCheckRunning && pendingResidualDisplays == null) {
+        } else if (s == HeroState.IDLE && !startupCheckRunning && pendingResidualDisplays == null) {
             heroSubline.text = idleConnectionHint(effectiveBluetoothMac() == null)
         }
         // 启动残留屏检查进行中：状态与副标题临时切换为检查提示
@@ -1505,76 +1438,40 @@ class MainActivity : AppCompatActivity() {
         refreshCarHotspot()
         updateConnectedSubline()
         updateHeroStats()
-        if (BuildConfig.CAR_PLUS) {
-            refreshResolutionInputs()
-            refreshCarPlusFrameRate()
-        }
+        refreshResolutionInputs()
+        refreshCarPlusFrameRate()
         updateDisplayResolutionNote()
-        updateAudioTag()
         updateReadyRow()
         updateDeviceSubtitle()
-        // 这行曾定义了却从未被调用：会话正常推流时标题位仍停在 XML 里的
-        // 「CarLife+ 未启动」，与「已连接 · 视频推流中」自相矛盾（用户实测
-        // 「荣耀车联提示连接成功、软件显示没连上」的观感来源之一）。
-        updateCarLifeStatus()
+        updateCarPlusStatus()
     }
 
     private fun connectingMessage(): String =
         SessionController.reconnectWaitSeconds()?.let {
             if (it > 0) "车机正在释放上次连接，约 ${it} 秒后自动重连"
             else "正在重新连接车机…"
-        } ?: (if (BuildConfig.CAR_PLUS) SessionController.carPlusConnectionMessage() else SessionController.phaseHint)
+        } ?: SessionController.carPlusConnectionMessage()
         ?: DEFAULT_CONNECTING_HINT
 
     private fun idleConnectionHint(macMissing: Boolean): String =
         when {
             macMissing -> HINT_MAC_MISSING
             SessionController.isCarOffline -> "等待车机下次连接"
-            BuildConfig.CAR_PLUS -> SessionController.lastConnectionFailure?.let { "上次连接 · $it" } ?: HINT_IDLE_READY
-            else -> HINT_IDLE_READY
+            else -> SessionController.lastConnectionFailure?.let { "上次连接 · $it" } ?: HINT_IDLE_READY
         }
 
-    /**
-     * 当前真正在用的码流尺寸。
-     *
-     * 直通模式下由 CarLife 引擎决定，而且**会变**：会话建立时引擎往往还停在默认
-     * 1280×720，收到车机分辨率（98311）之后才重建编码器。所以这里每次现取，
-     * 不能只记建链那一刻的快照——否则界面会一直显示临时值。
-     *
-     * 取值顺序是硬性的：**先 SPS 真值**。98311 申请值与 65544 回包值都只是「谈定的
-     * 档位」，引擎会按白名单降档（申请 1412×654 实编 1280×720，2026-10-29 日志实证）。
-     * 拿协商值当码流尺寸，界面就会写着「码流同尺寸」而车机上根本不是那个尺寸。
-     */
     private fun effectiveStreamSize(): Pair<Int, Int>? {
-        if (CarLifeHijack.isAttached || CarLifeHijack.isActive) {
-            CarLifeHijack.actualStreamSize?.let { return it }
-            val (w, h) = CarLifeHijack.videoSize
-            if (w > 0 && h > 0) return w to h
-        }
         val w = SessionController.activeStreamWidth
         val h = SessionController.activeStreamHeight
         return if (w > 0 && h > 0) w to h else null
     }
 
     /**
-     * 码流尺寸是否已经由 SPS 确认（false = 手上只有协商档位，还在等第一帧关键帧）。
-     *
-     * 非直通模式（自己出画面）没有「协商 vs 实编」这回事，恒为 true。
-     */
-    private fun streamSizeConfirmed(): Boolean =
-        if (CarLifeHijack.isAttached || CarLifeHijack.isActive) {
-            CarLifeHijack.actualStreamSize != null
-        } else {
-            true
-        }
-
-    /**
      * 英雄卡统计行（仅连接时显示）：运行时分辨率 + 实测帧率。
      * 实际帧率 = 1s 轮询对已发帧计数取差值；新会话计数归零时先对齐基线。
-     * 目标帧率不再展示（车机报 maxFPS 就跟随、没报按 60，见 [StreamFps]），只报实测值。
      *
      * 分辨率报**像素**，不再是「100%」这种只有自己看得懂的比例：车机原值在前，
-     * 码流与它不一致时用 `→` 接实际值（直通模式由 CarLife 引擎定尺寸）。
+     * 码流与它不一致时用 `→` 接实际值。
      */
     private fun updateHeroStats() {
         if (heroState != HeroState.CONNECTED) return
@@ -1602,74 +1499,33 @@ class MainActivity : AppCompatActivity() {
         heroStats.text = "分辨率 $resolution · 实际发送 ${actualSentFps ?: "—"} fps"
     }
 
-    /**
-     * 「显示」卡片里的分辨率行。
-     *
-     * 显示当前会话的车机通告和码流尺寸。ICCOA 另显示下次连接的设置，
-     * 旧模式在断开后显示上一次会话的记录。
-     */
+    /** 显示本轮车机分辨率与下次投屏设置。 */
     private fun updateDisplayResolutionNote() {
         val target = displayResolutionNote
         val running = SessionController.videoSender?.isRunning == true
-        if (BuildConfig.CAR_PLUS) {
-            val nextPeer = TargetDevicePrefs.get(this)
-            val nextSize = DisplayPrefs.carPlusStreamSize(this, nextPeer?.address)
-            val text = buildList {
-                if (running) {
-                    val current = effectiveStreamSize().takeIf {
-                        heroVideoSender?.let(SessionController::isCarPlusPictureReady) == true
-                    }
-                    add("当前投屏 · " + (current?.let { "${it.first}×${it.second}" } ?: "等待 Car+ 画面"))
-                    val w = SessionController.activeCarWidth
-                    val h = SessionController.activeCarHeight
-                    if (w > 0 && h > 0 && SessionController.activeCarResolutionFromCar) {
-                        add("车机分辨率 · $w×$h")
-                    } else {
-                        add("车机未提供分辨率")
-                    }
+        val nextPeer = TargetDevicePrefs.get(this)
+        val nextSize = DisplayPrefs.carPlusStreamSize(this, nextPeer?.address)
+        val text = buildList {
+            if (running) {
+                val current = effectiveStreamSize().takeIf {
+                    heroVideoSender?.let(SessionController::isCarPlusPictureReady) == true
                 }
-                val next = when {
-                    nextPeer == null -> "按连接到的车机应用设置"
-                    nextSize == null -> "${nextPeer.name} · 自动读取"
-                    else -> "${nextPeer.name} · ${nextSize.width}×${nextSize.height}"
-                }
-                add("下次连接 · $next")
-            }.joinToString("\n")
-            if (target.text != text) target.text = text
-            return
-        }
-        val text =
-            if (running && SessionController.activeCarWidth > 0) {
-                val carW = SessionController.activeCarWidth
-                val carH = SessionController.activeCarHeight
-                val stream = effectiveStreamSize()
-                val confirmed = streamSizeConfirmed()
-                when {
-                    !SessionController.activeCarResolutionFromCar ->
-                        "⚑ 车机未通告分辨率 · 按手机横屏 $carW×$carH 兜底"
-                    // 还没解析到 SPS：手上的 stream 只是协商档位，不能当成「同尺寸」
-                    !confirmed && (stream == null || (stream.first == carW && stream.second == carH)) ->
-                        "车机 $carW×$carH · 码流待确认（等首个关键帧）"
-                    stream != null && (stream.first != carW || stream.second != carH) ->
-                        "车机 $carW×$carH · 码流 ${stream.first}×${stream.second}（引擎按档位编码，非车机画布）"
-                    else -> "车机 $carW×$carH · 码流同尺寸"
-                }
-            } else {
-                val last = DisplayPrefs.lastSession(this)
-                val streamDiffers =
-                    last != null &&
-                        last.streamWidth > 0 &&
-                        (last.streamWidth != last.carWidth || last.streamHeight != last.carHeight)
-                when {
-                    last == null -> "连接后自动读取车机分辨率"
-                    !last.carFromCar ->
-                        "上次：车机未通告 · 按手机横屏 ${last.carWidth}×${last.carHeight} 兜底"
-                    streamDiffers ->
-                        "上次：车机 ${last.carWidth}×${last.carHeight} · " +
-                            "码流 ${last.streamWidth}×${last.streamHeight}（引擎按档位编码）"
-                    else -> "上次：车机 ${last.carWidth}×${last.carHeight}"
+                add("当前投屏 · " + (current?.let { "${it.first}×${it.second}" } ?: "等待 Car+ 画面"))
+                val w = SessionController.activeCarWidth
+                val h = SessionController.activeCarHeight
+                if (w > 0 && h > 0 && SessionController.activeCarResolutionFromCar) {
+                    add("车机分辨率 · $w×$h")
+                } else {
+                    add("车机未提供分辨率")
                 }
             }
+            val next = when {
+                nextPeer == null -> "按连接到的车机应用设置"
+                nextSize == null -> "${nextPeer.name} · 自动读取"
+                else -> "${nextPeer.name} · ${nextSize.width}×${nextSize.height}"
+            }
+            add("下次连接 · $next")
+        }.joinToString("\n")
         if (target.text != text) target.text = text
     }
 
@@ -1734,16 +1590,13 @@ class MainActivity : AppCompatActivity() {
                     "启动连接",
                     blocked = macMissing,
                 )
-                audioTag.visibility = View.GONE
             }
             HeroState.CONNECTING -> {
                 heroSubline.text = connectingMessage()
                 styleCta(R.drawable.bg_btn_tonal, R.color.m3_on_sec_container, R.drawable.ic_close, "取消连接")
-                audioTag.visibility = View.GONE
             }
             HeroState.CONNECTED -> {
                 styleCta(R.drawable.bg_cta_outline_err, R.color.m3_error, R.drawable.ic_power, "断开连接")
-                audioTag.visibility = if (BuildConfig.CAR_PLUS) View.GONE else View.VISIBLE
             }
         }
 
@@ -1786,10 +1639,6 @@ class MainActivity : AppCompatActivity() {
                 .trim()
                 .ifEmpty { "车机热点" }
         val details = String.format(Locale.US, "%s · %02d:%02d", ssid, mm, ss)
-        if (!BuildConfig.CAR_PLUS) {
-            heroSubline.text = "$details · 视频推流中"
-            return
-        }
         val sender = heroVideoSender ?: return
         val flowing = SessionController.isCarPlusPictureReady(sender)
         val title = if (flowing) "正在投屏" else "车机已连接"
@@ -1810,45 +1659,8 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun bindDisplayCard() {
-        val ctx = this
-
-        // 本地 CarLife 劫持开关：接管手机原生 CarLife 码流（默认开；失败自动回退隐形屏）
-        val hijackSwitch = findViewById<SwitchCompat>(R.id.switchCarLifeHijack)
-        val hijackNote = findViewById<TextView>(R.id.carLifeHijackNote)
-        hijackSwitch.isChecked =
-            if (BuildConfig.CAR_PLUS) BuildConfig.CAR_PLUS_RUNTIME else CarLifeHijack.isEnabled(ctx)
-        if (BuildConfig.CAR_PLUS) hijackSwitch.visibility = View.GONE
-
-        fun refreshHijackNote() {
-            val running = CarLifeHijack.isActive
-            hijackNote.text =
-                when {
-                    BuildConfig.CAR_PLUS -> "本测试包使用 ICCOA Car+ 视频源。"
-                    !hijackSwitch.isChecked ->
-                        "开启后每次连接都会优先尝试：需先在荣耀车联里进入「无线 WLAN 连接」并停在" +
-                            "「正在连接」；1.5 秒内接管不到会自动回退隐形屏。"
-                    running -> "已生效：当前画面来自手机原生 CarLife（触控经 CarLife 通道回传）。"
-                    else -> "已开启。请在手机上手动打开 CarLife+ 并点「无线连接」，端口一开即自动接管。"
-                }
-        }
-        refreshHijackNote()
-        hijackSwitch.setOnCheckedChangeListener { _, checked ->
-            CarLifeHijack.setEnabled(ctx, checked)
-            refreshHijackNote()
-            snack(
-                if (checked) "本地 CarLife 劫持已开启（下次连接起效）" else "本地 CarLife 劫持已关闭",
-            )
-        }
-
-        if (BuildConfig.CAR_PLUS) {
-            bindCarPlusStreamSize()
-            if (BuildConfig.CAR_PLUS_RUNTIME) bindCarPlusFrameRate()
-        } else {
-            bindStreamScale()
-            VirtualLauncher.setStreamFps(StreamFps.DEFAULT_FPS)
-        }
-
-        bindTouchThrottle()
+        bindCarPlusStreamSize()
+        if (BuildConfig.CAR_PLUS_RUNTIME) bindCarPlusFrameRate()
     }
 
     private fun carPlusFrameRatePeer(): TargetDevicePrefs.Target? =
@@ -1897,12 +1709,11 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun bindCarPlusStreamSize() {
-        findViewById<View>(R.id.displayScaleControls).visibility = View.GONE
         findViewById<View>(R.id.displaySizeControls).visibility = View.VISIBLE
         findViewById<View>(R.id.displayHistoryPanel).visibility = View.VISIBLE
         val width = findViewById<EditText>(R.id.displayWidthInput)
         val height = findViewById<EditText>(R.id.displayHeightInput)
-        val note = findViewById<TextView>(R.id.displayScaleNote)
+        val note = findViewById<TextView>(R.id.displaySizeNote)
         findViewById<View>(R.id.displaySizeTarget).visibility = View.VISIBLE
         refreshResolutionInputs(force = true)
         note.text = "留空并保存可恢复自动读取 · 下次连接生效"
@@ -1950,9 +1761,9 @@ class MainActivity : AppCompatActivity() {
         empty.visibility = if (entries.isEmpty()) View.VISIBLE else View.GONE
         list.removeAllViews()
         if (entries.isEmpty()) {
-            val last = DisplayPrefs.lastSession(this)?.takeIf { it.carFromCar }
+            val last = DisplayPrefs.lastReportedCanvas(this)
             empty.text = if (last == null) getString(R.string.display_history_empty)
-            else getString(R.string.display_history_legacy, last.carWidth, last.carHeight)
+            else getString(R.string.display_history_legacy, last.width, last.height)
         }
         entries.forEachIndexed { index, entry ->
             val row = layoutInflater.inflate(R.layout.item_display_history, list, false)
@@ -1976,128 +1787,6 @@ class MainActivity : AppCompatActivity() {
             }
             list.addView(row)
         }
-    }
-
-    private fun bindStreamScale() {
-        val ctx = this
-        val scaleSeek = findViewById<SeekBar>(R.id.displayScaleSeek)
-        val scaleValue = findViewById<TextView>(R.id.displayScaleValue)
-        val scaleNote = findViewById<TextView>(R.id.displayScaleNote)
-
-        fun progressOf(percent: Int) = (percent - DisplayPrefs.SCALE_MIN) / DisplayPrefs.SCALE_STEP
-
-        fun percentOf(progress: Int) = DisplayPrefs.SCALE_MIN + progress * DisplayPrefs.SCALE_STEP
-
-        val saved = DisplayPrefs.scalePercent(ctx)
-        scaleSeek.progress = progressOf(saved)
-        scaleValue.text = "$saved%"
-
-        fun refreshScaleNote() {
-            val runningNow = SessionController.videoSender?.isRunning == true
-            val percent = DisplayPrefs.scalePercent(ctx)
-            // 百分比单独摆着没有信息量：顺手换算成像素（与 SessionController 同一套
-            // 偶数对齐、最小边限制），用户一眼能看出「120% 到底是多少」。
-            val car =
-                if (runningNow && SessionController.activeCarWidth > 0) {
-                    SessionController.activeCarWidth to SessionController.activeCarHeight
-                } else {
-                    DisplayPrefs.lastSession(ctx)?.let { it.carWidth to it.carHeight }
-                }
-            val mapped =
-                car?.let { (w, h) ->
-                    val sw = ((w * percent / 100f).toInt().coerceAtLeast(320) / 2) * 2
-                    val sh = ((h * percent / 100f).toInt().coerceAtLeast(180) / 2) * 2
-                    "$percent% ≈ ${sw}×$sh"
-                }
-            scaleNote.text =
-                when {
-                    runningNow ->
-                        "保存后下次连接起效；当前连接按 ${SessionController.activeScalePercent}% 运行" +
-                            (mapped?.let { "（$it）" } ?: "") +
-                            // 直通模式下码流尺寸是 CarLife 引擎说了算，缩放只影响本地虚拟屏：
-                            // 不点明的话，这行的像素换算会被当成「实际在推的分辨率」。
-                            if (CarLifeHijack.isAttached || CarLifeHijack.isActive) {
-                                " · 直通码流由引擎定"
-                            } else {
-                                ""
-                            }
-                    mapped != null -> "保存后下次连接起效 · $mapped"
-                    else -> "保存后下次连接起效"
-                }
-        }
-        refreshScaleNote()
-
-        scaleSeek.setOnSeekBarChangeListener(
-            object : SeekBar.OnSeekBarChangeListener {
-                override fun onProgressChanged(
-                    seekBar: SeekBar?,
-                    progress: Int,
-                    fromUser: Boolean,
-                ) {
-                    if (!fromUser) return
-                    scaleValue.text = "${percentOf(progress)}%"
-                }
-
-                override fun onStartTrackingTouch(seekBar: SeekBar?) = Unit
-
-                override fun onStopTrackingTouch(seekBar: SeekBar?) {
-                    val percent = percentOf(scaleSeek.progress)
-                    DisplayPrefs.setScalePercent(ctx, percent)
-                    snack("分辨率 $percent% 已保存，下次连接起效")
-                    refreshScaleNote()
-                }
-            },
-        )
-    }
-
-    private fun bindTouchThrottle() {
-        val ctx = this
-        // 触摸注入节流（0=关闭，步进 8ms）
-        val throttleSeek = findViewById<SeekBar>(R.id.throttleSeek)
-        val throttleValue = findViewById<TextView>(R.id.throttleValue)
-
-        fun throttleText(ms: Int) = if (ms <= 0) "关闭" else "${ms}ms"
-
-        val savedThrottle = DisplayPrefs.moveThrottleMs(ctx)
-        throttleSeek.progress = savedThrottle / 8
-        throttleValue.text = throttleText(savedThrottle)
-        TouchRouter.moveThrottleMs = savedThrottle.toLong()
-
-        throttleSeek.setOnSeekBarChangeListener(
-            object : SeekBar.OnSeekBarChangeListener {
-                override fun onProgressChanged(
-                    seekBar: SeekBar?,
-                    progress: Int,
-                    fromUser: Boolean,
-                ) {
-                    if (!fromUser) return
-                    val ms = progress * 8
-                    throttleValue.text = throttleText(ms)
-                    DisplayPrefs.setMoveThrottleMs(ctx, ms)
-                    TouchRouter.moveThrottleMs = ms.toLong()
-                }
-
-                override fun onStartTrackingTouch(seekBar: SeekBar?) = Unit
-
-                override fun onStopTrackingTouch(seekBar: SeekBar?) {
-                    snack("滑动上报间隔 ${throttleText(DisplayPrefs.moveThrottleMs(ctx))}")
-                }
-            },
-        )
-    }
-
-    private fun updateAudioTag() {
-        if (heroState != HeroState.CONNECTED) return
-        // 2026-10-24 起默认带声音（无开关），只看音频通道是否真的在推流
-        val on = SessionController.audioSender?.isRunning == true
-        val icon =
-            ContextCompat.getDrawable(
-                this,
-                if (on) R.drawable.ic_music_small else R.drawable.ic_volume_off_small,
-            )!!
-        DrawableCompat.setTint(icon.mutate(), getColor(if (on) R.color.m3_ok else R.color.m3_outline))
-        audioTag.setCompoundDrawablesWithIntrinsicBounds(icon, null, null, null)
-        audioTag.text = if (on) "车机侧声音 · 开启" else "车机侧声音 · 关闭"
     }
 
     /**
@@ -2259,7 +1948,7 @@ class MainActivity : AppCompatActivity() {
                 ) {
                     TargetDevicePrefs.set(this@MainActivity, null)
                     resolutionHistoryPeer = null
-                    if (BuildConfig.CAR_PLUS) refreshResolutionInputs(force = true)
+                    refreshResolutionInputs(force = true)
                     renderCarApproachNote()
                     refreshCarHotspot()
                     log("TARGET: 已取消目标指定——出站逐个尝试已配对设备，入站接受任一设备")
@@ -2614,7 +2303,7 @@ class MainActivity : AppCompatActivity() {
                 },
         )
         resolutionHistoryPeer = null
-        if (BuildConfig.CAR_PLUS) refreshResolutionInputs(force = true)
+        refreshResolutionInputs(force = true)
         updateDisplayResolutionNote()
         snack("目标已设为「$name」")
         updateReadyRow()
@@ -2692,17 +2381,15 @@ class MainActivity : AppCompatActivity() {
     private fun copyIssueSummary() {
         val target = SessionController.activeCarPlusPeer ?: TargetDevicePrefs.get(this)
         val sender = SessionController.videoSender?.takeIf {
-            it.isRunning && (!BuildConfig.CAR_PLUS || SessionController.currentClient?.isRetired != true)
+            it.isRunning && SessionController.currentClient?.isRetired != true
         }
         val stage = when {
             SessionController.disconnecting -> "正在断开连接"
-            sender != null && BuildConfig.CAR_PLUS -> if (SessionController.isCarPlusPictureReady(sender)) {
+            sender != null -> if (SessionController.isCarPlusPictureReady(sender)) {
                 "正在投屏"
             } else {
                 "车机已连接 · ${SessionController.carPlusVideoMessage(sender)}"
             }
-            sender?.isVideoFlowing == true -> "正在投屏"
-            sender != null -> "车机已连接，等待画面"
             SessionController.isSessionRunning() || SessionController.sessionStarting.get() -> connectingMessage()
             SessionController.isCarOffline -> "车机已离线"
             else -> "未连接"
@@ -3172,10 +2859,8 @@ class MainActivity : AppCompatActivity() {
 
     override fun onResume() {
         super.onResume()
-        if (BuildConfig.CAR_PLUS) {
-            CarPlusResolutionHistory.preferences(this).registerOnSharedPreferenceChangeListener(displayHistoryListener)
-            renderDisplayHistory()
-        }
+        CarPlusResolutionHistory.preferences(this).registerOnSharedPreferenceChangeListener(displayHistoryListener)
+        renderDisplayHistory()
         // 离车时保留用户正在看的界面。
         AppUiPresence.markResumed()
         lastFpsSampleAt = 0L
@@ -3330,9 +3015,7 @@ class MainActivity : AppCompatActivity() {
 
     override fun onPause() {
         super.onPause()
-        if (BuildConfig.CAR_PLUS) {
-            CarPlusResolutionHistory.preferences(this).unregisterOnSharedPreferenceChangeListener(displayHistoryListener)
-        }
+        CarPlusResolutionHistory.preferences(this).unregisterOnSharedPreferenceChangeListener(displayHistoryListener)
         AppUiPresence.markPaused()
         mainHandler.removeCallbacks(heroTick)
     }
