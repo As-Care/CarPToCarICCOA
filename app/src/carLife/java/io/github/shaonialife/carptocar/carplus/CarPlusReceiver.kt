@@ -9,6 +9,7 @@ import io.github.shaonialife.carptocar.video.VideoSender
 internal object CarPlusReceiver {
     val status: String get() = ""
     val isSourceConnected: Boolean get() = false
+    val castProgress: CarPlusVideo.CastProgress get() = CarPlusVideo.CastProgress()
     val isRunning: Boolean get() = false
 
     fun start(context: Context, refresh: Boolean = false) = Unit
@@ -29,7 +30,7 @@ internal object CarPlusReceiver {
 
     fun detach(surface: Surface) = Unit
 
-    fun onTouch(contact: Contact, displayWidth: Int, displayHeight: Int) = Unit
+    fun onTouch(sender: VideoSender, contacts: List<Contact>, displayWidth: Int, displayHeight: Int) = Unit
 
     fun startAudio() = Unit
 

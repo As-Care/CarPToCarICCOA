@@ -32,7 +32,6 @@ internal object CarPlusReceiver {
     private var directDecoder: DirectDecoder? = null
     @Volatile private var videoRequest = CarPlusVideo.Request()
     @Volatile private var sourceSize = CarPlusVideo.defaultSize
-    private var touchInImage = false
     private var encodedSender: VideoSender? = null
     private var encodedSize = CarPlusVideo.defaultSize
     private var encodedVideo: CarPlusEncodedVideo? = null
@@ -57,7 +56,11 @@ internal object CarPlusReceiver {
                     unbind()
                 }
                 CarPlusReceiverService.STATUS -> {
-                    updateSourceConnected(message.data.getBoolean(CarPlusReceiverService.SOURCE_CONNECTED))
+                    updateCastProgress(CarPlusVideo.CastProgress(
+                        connected = message.data.getBoolean(CarPlusReceiverService.SOURCE_CONNECTED),
+                        startedAt = message.data.getLong(CarPlusReceiverService.CAST_STARTED_AT),
+                        sourceFrameSeen = message.data.getBoolean(CarPlusReceiverService.SOURCE_FRAME_SEEN),
+                    ))
                     message.data.getString(CarPlusReceiverService.STATUS_TEXT)?.let { status = it }
                     message.data.getString(CarPlusReceiverService.LOG_TEXT)?.let { SessionController.appendLog("ICCOA: $it") }
                 }
@@ -89,12 +92,18 @@ internal object CarPlusReceiver {
     val isRunning: Boolean get() = bindingContext != null && !pendingStop
 
     @Volatile
-    var isSourceConnected = false
+    var castProgress = CarPlusVideo.CastProgress()
         private set
 
-    private fun updateSourceConnected(connected: Boolean) {
-        val ended = isSourceConnected && !connected
-        isSourceConnected = connected
+    val isSourceConnected: Boolean get() = castProgress.connected
+
+    private fun updateCastProgress(progress: CarPlusVideo.CastProgress = CarPlusVideo.CastProgress()) {
+        val ended = isSourceConnected && !progress.connected
+        castProgress = if (progress.connected) {
+            progress
+        } else {
+            progress.copy(disconnectedAt = if (ended) SystemClock.elapsedRealtime() else castProgress.disconnectedAt)
+        }
         if (ended) bindingContext?.let(CarIdleGuard::onProjectionStopped)
     }
 
@@ -112,7 +121,7 @@ internal object CarPlusReceiver {
         override fun onServiceDisconnected(name: ComponentName) {
             if (bindingContext == null) return
             receiver = null
-            updateSourceConnected(false)
+            updateCastProgress()
             status = "ICCOA 接收进程已断开 · 正在恢复"
         }
 
@@ -243,7 +252,6 @@ internal object CarPlusReceiver {
             encodedRoute = null
             encodedVideo?.close()
             encodedVideo = null
-            touchInImage = false
             sendSurface(null)
         }
     }
@@ -297,27 +305,18 @@ internal object CarPlusReceiver {
             sendSurface(null)
             scaler?.close()
             scaler = null
-            touchInImage = false
         }
     }
 
-    fun onTouch(contact: Contact, displayWidth: Int, displayHeight: Int) {
+    fun onTouch(sender: VideoSender, contacts: List<Contact>, displayWidth: Int, displayHeight: Int) {
         if (!BuildConfig.CAR_PLUS_RUNTIME || displayWidth <= 0 || displayHeight <= 0) return
         onMain {
+            if (SessionController.videoSender !== sender || !sender.isRunning) return@onMain
             if (surface != null || encodedSender?.isRunning == true) {
                 val display = CarPlusVideo.Size(displayWidth, displayHeight)
                 val viewport = if (scaler != null) CarPlusVideo.fit(sourceSize, display)
                 else CarPlusVideo.Viewport(0, 0, displayWidth, displayHeight)
-                val dx = contact.xPixels - viewport.x
-                val dy = contact.yPixels - viewport.y
-                if (!touchInImage && (!contact.down || dx !in 0 until viewport.width || dy !in 0 until viewport.height)) {
-                    return@onMain
-                }
-                touchInImage = contact.down
-                val x = (dx * CarPlusVideo.WIDTH / viewport.width).coerceIn(0, CarPlusVideo.WIDTH - 1)
-                val y = (dy * CarPlusVideo.HEIGHT / viewport.height).coerceIn(0, CarPlusVideo.HEIGHT - 1)
-                val what = if (contact.down) CarPlusReceiverService.TOUCH_PRESSED else CarPlusReceiverService.TOUCH_RELEASED
-                send(Message.obtain(null, what, x, y))
+                send(CarPlusReceiverService.touchMessage(contacts, viewport))
             }
         }
     }
@@ -342,10 +341,9 @@ internal object CarPlusReceiver {
             directDecoder = null
             scaler?.close()
             scaler = null
-            touchInImage = false
             refreshPending = false
             videoRequest = CarPlusVideo.Request()
-            updateSourceConnected(false)
+            updateCastProgress()
             status = "ICCOA 接收端已停止 · 点此启动"
         }
     }
@@ -409,7 +407,7 @@ internal object CarPlusReceiver {
             true
         } catch (_: RemoteException) {
             receiver = null
-            updateSourceConnected(false)
+            updateCastProgress()
             status = "ICCOA 接收进程已断开 · 正在恢复"
             false
         }
@@ -417,7 +415,7 @@ internal object CarPlusReceiver {
 
     private fun unbind() {
         pendingStop = false
-        updateSourceConnected(false)
+        updateCastProgress()
         val app = bindingContext
         bindingContext = null
         receiver = null

@@ -100,7 +100,6 @@ class MainActivity : AppCompatActivity() {
         const val KEY_LOG_ISSUES_ONLY = "log_issues_only"
         const val KEY_RESOLUTION_PEER_ADDRESS = "resolution_peer_address"
         const val KEY_RESOLUTION_PEER_NAME = "resolution_peer_name"
-        const val CAR_PLUS_PICTURE_WAIT_MS = 10_000L
 
         /** 本机蓝牙地址未填写：英雄卡副标题与输入框下方提示共用同一句。 */
         const val HINT_MAC_MISSING = "本机蓝牙地址未填写 —— 请先在下方填写并保存"
@@ -161,7 +160,6 @@ class MainActivity : AppCompatActivity() {
     private var heroCarOffline = false
     private var connectedAt = 0L
     private var heroVideoSender: VideoSender? = null
-    private var carPlusPictureMissingAt = 0L
     private var supportsSystemCarPlus = false
     private var hubBlink: ObjectAnimator? = null
 
@@ -1452,7 +1450,7 @@ class MainActivity : AppCompatActivity() {
     private fun updateCarLifeStatus() {
         val text =
             when {
-                BuildConfig.CAR_PLUS -> if (SessionController.isCarProjectionActive()) {
+                BuildConfig.CAR_PLUS -> if (heroVideoSender?.let(SessionController::isCarPlusPictureReady) == true) {
                     "CarPlay 正在接收 ICCOA Car+ 画面"
                 } else {
                     CarPlusReceiver.status
@@ -1470,11 +1468,12 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun tickHero() {
-        val sender = SessionController.videoSender?.takeIf { it.isRunning }
+        val sender = SessionController.videoSender?.takeIf {
+            it.isRunning && (!BuildConfig.CAR_PLUS || SessionController.currentClient?.isRetired != true)
+        }
         if (sender !== heroVideoSender) {
             heroVideoSender = sender
             connectedAt = SystemClock.elapsedRealtime()
-            carPlusPictureMissingAt = 0L
             lastFpsSampleAt = 0L
             actualSentFps = null
         }
@@ -1494,6 +1493,8 @@ class MainActivity : AppCompatActivity() {
         // 连接中：副标题跟随阶段提示（英雄卡内即可见，不必划到底部看日志）
         if (s == HeroState.CONNECTING) {
             heroSubline.text = connectingMessage()
+        } else if (BuildConfig.CAR_PLUS && s == HeroState.IDLE && !startupCheckRunning && pendingResidualDisplays == null) {
+            heroSubline.text = idleConnectionHint(effectiveBluetoothMac() == null)
         }
         // 启动残留屏检查进行中：状态与副标题临时切换为检查提示
         if (s == HeroState.IDLE && startupCheckRunning) {
@@ -1522,12 +1523,14 @@ class MainActivity : AppCompatActivity() {
         SessionController.reconnectWaitSeconds()?.let {
             if (it > 0) "车机正在释放上次连接，约 ${it} 秒后自动重连"
             else "正在重新连接车机…"
-        } ?: SessionController.phaseHint ?: DEFAULT_CONNECTING_HINT
+        } ?: (if (BuildConfig.CAR_PLUS) SessionController.carPlusConnectionMessage() else SessionController.phaseHint)
+        ?: DEFAULT_CONNECTING_HINT
 
     private fun idleConnectionHint(macMissing: Boolean): String =
         when {
             macMissing -> HINT_MAC_MISSING
             SessionController.isCarOffline -> "等待车机下次连接"
+            BuildConfig.CAR_PLUS -> SessionController.lastConnectionFailure?.let { "上次连接 · $it" } ?: HINT_IDLE_READY
             else -> HINT_IDLE_READY
         }
 
@@ -1613,7 +1616,9 @@ class MainActivity : AppCompatActivity() {
             val nextSize = DisplayPrefs.carPlusStreamSize(this, nextPeer?.address)
             val text = buildList {
                 if (running) {
-                    val current = effectiveStreamSize().takeIf { SessionController.isCarProjectionActive(heroVideoSender) }
+                    val current = effectiveStreamSize().takeIf {
+                        heroVideoSender?.let(SessionController::isCarPlusPictureReady) == true
+                    }
                     add("当前投屏 · " + (current?.let { "${it.first}×${it.second}" } ?: "等待 Car+ 画面"))
                     val w = SessionController.activeCarWidth
                     val h = SessionController.activeCarHeight
@@ -1785,17 +1790,11 @@ class MainActivity : AppCompatActivity() {
             heroSubline.text = "$details · 视频推流中"
             return
         }
-        val flowing = SessionController.isCarProjectionActive(heroVideoSender)
-        if (flowing) carPlusPictureMissingAt = 0L
-        else if (carPlusPictureMissingAt == 0L) carPlusPictureMissingAt = now
-        val waitingTooLong = !flowing && now - carPlusPictureMissingAt >= CAR_PLUS_PICTURE_WAIT_MS
+        val sender = heroVideoSender ?: return
+        val flowing = SessionController.isCarPlusPictureReady(sender)
         val title = if (flowing) "正在投屏" else "车机已连接"
         if (heroStateText.text != title) heroStateText.text = title
-        heroSubline.text = when {
-            flowing -> details
-            waitingTooLong -> "Car+ 暂无画面\n$details"
-            else -> "等待 Car+ 画面\n$details"
-        }
+        heroSubline.text = if (flowing) details else "${SessionController.carPlusVideoMessage(sender)}\n$details"
         heroStats.visibility = if (flowing) View.VISIBLE else View.GONE
     }
 
@@ -2692,13 +2691,18 @@ class MainActivity : AppCompatActivity() {
 
     private fun copyIssueSummary() {
         val target = SessionController.activeCarPlusPeer ?: TargetDevicePrefs.get(this)
-        val sender = SessionController.videoSender
-        val projecting = if (BuildConfig.CAR_PLUS) SessionController.isCarProjectionActive(sender)
-            else sender?.isVideoFlowing == true
+        val sender = SessionController.videoSender?.takeIf {
+            it.isRunning && (!BuildConfig.CAR_PLUS || SessionController.currentClient?.isRetired != true)
+        }
         val stage = when {
             SessionController.disconnecting -> "正在断开连接"
-            projecting -> "正在投屏"
-            sender?.isRunning == true -> "车机已连接，等待${if (BuildConfig.CAR_PLUS) " Car+" else ""}画面"
+            sender != null && BuildConfig.CAR_PLUS -> if (SessionController.isCarPlusPictureReady(sender)) {
+                "正在投屏"
+            } else {
+                "车机已连接 · ${SessionController.carPlusVideoMessage(sender)}"
+            }
+            sender?.isVideoFlowing == true -> "正在投屏"
+            sender != null -> "车机已连接，等待画面"
             SessionController.isSessionRunning() || SessionController.sessionStarting.get() -> connectingMessage()
             SessionController.isCarOffline -> "车机已离线"
             else -> "未连接"

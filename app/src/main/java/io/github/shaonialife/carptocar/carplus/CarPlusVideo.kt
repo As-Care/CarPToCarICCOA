@@ -35,6 +35,22 @@ internal object CarPlusVideo {
 
     data class Viewport(val x: Int, val y: Int, val width: Int, val height: Int)
 
+    data class CastProgress(
+        val connected: Boolean = false,
+        val startedAt: Long = 0L,
+        val sourceFrameSeen: Boolean = false,
+        val disconnectedAt: Long = 0L,
+    ) {
+        fun hasForwardedFrame(lastSourceFrameSentAt: Long): Boolean =
+            connected && startedAt > 0 && lastSourceFrameSentAt >= startedAt
+
+        fun waitingMessage(overdue: Boolean): String = when {
+            !connected -> if (overdue) "等待手机 Car+ 连接超时" else "等待手机 Car+ 连接"
+            sourceFrameSeen -> if (overdue) "已收到 Car+ 画面，但未能发给车机" else "已收到 Car+ 画面，等待发给车机"
+            else -> if (overdue) "等待 Car+ 首帧超时" else "等待 Car+ 首帧"
+        }
+    }
+
     val defaultSize = Size(WIDTH, HEIGHT)
 
     fun displaySize(width: Int, height: Int): Size? =

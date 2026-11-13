@@ -6,7 +6,10 @@ import re
 import subprocess
 from pathlib import Path
 from tempfile import TemporaryDirectory
-from zipfile import ZipFile
+from zipfile import ZIP_DEFLATED, ZipFile
+
+
+APK_DEX = re.compile(r"classes(\d*)\.dex")
 
 
 def instrument_sdk(java: Path, sdk_dex: Path, output: Path, tools: Path, patch: str) -> None:
@@ -50,14 +53,16 @@ def package(base_apk: Path, sdk_dex: Path, tools: Path, keystore: Path, output: 
                 raise ValueError("The Android build did not package ccd.data")
             if audio_java is not None and b"CarPlusAudioTap" in source.read("assets/iccoa-relay/relay.js"):
                 raise ValueError("Use the standard ICCOA relay assets. The SDK DEX already handles audio forwarding.")
-            classes = [re.fullmatch(r"classes(\d*)\.dex", name) for name in source.namelist()]
+            classes = [APK_DEX.fullmatch(name) for name in source.namelist()]
             last_dex = max(int(match[1] or "1") for match in classes if match)
             for entry in source.infolist():
                 if re.fullmatch(r"META-INF/(MANIFEST\.MF|[^/]+\.(SF|RSA|DSA|EC))", entry.filename):
                     continue
-                destination.writestr(entry, source.read(entry))
+                # Compress the top-level DEX entries without changing resource or native library packaging.
+                compression = ZIP_DEFLATED if APK_DEX.fullmatch(entry.filename) else entry.compress_type
+                destination.writestr(entry, source.read(entry), compress_type=compression)
             dex_name = f"classes{last_dex + 1}.dex"
-            destination.writestr(dex_name, dex)
+            destination.writestr(dex_name, dex, compress_type=ZIP_DEFLATED)
 
         subprocess.run([tools / "zipalign", "-f", "-p", "4", unsigned, aligned], check=True)
         subprocess.run(

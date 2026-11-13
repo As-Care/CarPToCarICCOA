@@ -13,13 +13,15 @@ import android.os.SystemClock
 enum class ConnectStage(
     val label: String,
     val budgetMs: Long,
+    val waitingMessage: String,
+    val failureMessage: String,
 ) {
-    ENDPOINT("等车机连接信息（0x4301）", 5 * 60_000L),
-    WIFI("加入车机热点", 60_000L),
-    PAIRING("AirPlay 配对", 120_000L),
-    SETUP("会话建立（SETUP）", 30_000L),
-    FIRST_FRAME("等首帧", 20_000L),
-    STREAMING("推流中", 0L),
+    ENDPOINT("等车机连接信息（0x4301）", 5 * 60_000L, "等待车机提供连接信息", "未收到车机连接信息"),
+    WIFI("加入车机热点", 60_000L, "等待连接车机热点", "未能连接车机热点"),
+    PAIRING("AirPlay 配对", 120_000L, "正在与车机建立连接", "未能完成车机配对"),
+    SETUP("会话建立（SETUP）", 30_000L, "正在建立 CarPlay 会话", "未能建立 CarPlay 会话"),
+    FIRST_FRAME("等首帧", 20_000L, "正在建立车机视频通道", "车机视频通道未就绪"),
+    STREAMING("推流中", 0L, "正在投屏", ""),
     ;
 
     val hasBudget: Boolean get() = budgetMs > 0L
@@ -58,6 +60,33 @@ class ConnectBudget(
     private var reason = ""
     private var current: Entry? = null
     private val history = ArrayList<Entry>(8)
+
+    internal data class Progress(
+        val stage: ConnectStage?,
+        val overdue: Boolean,
+        val lastFailure: String?,
+    )
+
+    private var lastFailure: String? = null
+
+    internal fun progress(): Progress = synchronized(lock) {
+        val entry = current
+        Progress(
+            stage = entry?.stage,
+            overdue = entry != null && entry.stage.hasBudget && clock() - entry.atMillis > entry.stage.budgetMs,
+            lastFailure = lastFailure,
+        )
+    }
+
+    internal fun clearProgress() {
+        synchronized(lock) {
+            active = false
+            current = null
+            history.clear()
+            reason = ""
+            lastFailure = null
+        }
+    }
 
     /** 本轮是否有进行中的计时（未 [begin] 时一切记录为空操作）。 */
     val isActive: Boolean get() = synchronized(lock) { active }
@@ -114,7 +143,9 @@ class ConnectBudget(
         synchronized(lock) {
             val now = clock()
             if (!active) return
+            if (current?.stage == ConnectStage.STREAMING) return
             current = Entry(ConnectStage.STREAMING, now).also { history += it }
+            lastFailure = null
             line = "STAGE: ✓ 首帧已到达，开始推流（本轮累计 ${seconds(now - startedAt)}）${if (extra.isEmpty()) "" else " $extra"}"
         }
         sink(line)
@@ -159,6 +190,7 @@ class ConnectBudget(
     fun end(
         cause: String = "",
         keywords: String = "",
+        displayFailure: String? = null,
     ): String? {
         val verdict: String
         val summaryLine: String
@@ -166,6 +198,7 @@ class ConnectBudget(
             if (!active) return null
             val now = clock()
             val stage = current?.stage ?: ConnectStage.ENDPOINT
+            if (stage != ConnectStage.STREAMING) lastFailure = displayFailure ?: stage.failureMessage
             // 总耗时留给紧跟其后的小结行，结论行只说「卡在哪、为什么」——两行各司其职，
             // 同一条「共 60s」不要在相邻两行里重复。
             verdict =

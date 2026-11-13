@@ -88,6 +88,7 @@ class VideoSender(
     private val viewAreaSize: (() -> Pair<Int, Int>)? = null,
     private val onSurfaceStopped: ((Surface) -> Unit)? = null,
     private val limitSurfaceFps: Boolean = false,
+    private val onFirstSourceFrameSent: (() -> Unit)? = null,
 ) {
     private val width: Int = (width / 2) * 2
     private val height: Int = (height / 2) * 2
@@ -218,10 +219,6 @@ class VideoSender(
     /** 空闲重发次数（日志限频用）。 */
     private var idleResendCount = 0L
 
-    /** 空闲重发时不打印逐帧日志（否则每秒两行刷屏）。 */
-    @Volatile
-    private var suppressFrameLog = false
-
     /** AES-CTR 密钥流实例：状态必须跨帧连续（每帧新建会导致对端解出乱码）。 */
     private val aesStream: AirPlayCrypto.Aes128CtrStream? =
         (frameCipher as? StreamFrameCipher.AesCtr)?.let { AirPlayCrypto.Aes128CtrStream(it.key, it.iv) }
@@ -236,12 +233,20 @@ class VideoSender(
 
     @Volatile
     private var framesSent = 0L
+    @Volatile
+    private var lastSourceFrameSent = 0L
+    @Volatile
+    var startedAt: Long = 0L
+        private set
 
     /** 推流是否活跃（静默降噪守卫判断用：start 失败时保持 false）。 */
     val isRunning: Boolean get() = running.get()
 
     /** 已成功写入视频通道的帧总数。 */
     val framesSentTotal: Long get() = framesSent
+
+    /** Monotonic timestamp for the last newly forwarded frame, excluding idle resends. */
+    val lastSourceFrameSentAt: Long get() = lastSourceFrameSent
 
     /**
      * 提前建立屏幕数据端口 TCP 连接（幂等）。
@@ -369,6 +374,7 @@ class VideoSender(
             codec.start()
             ended.set(false)
             lastFrameAtMs = 0L
+            if (startedAt == 0L) startedAt = android.os.SystemClock.elapsedRealtime()
             running.set(true)
             lastKeepAliveAt = android.os.SystemClock.uptimeMillis()
 
@@ -525,6 +531,7 @@ class VideoSender(
         this.strictKeyFrames = strictKeyFrames
         passthrough = true
         ended.set(false)
+        if (startedAt == 0L) startedAt = android.os.SystemClock.elapsedRealtime()
         running.set(true)
         lastKeepAliveAt = android.os.SystemClock.uptimeMillis()
         // 新一轮会话：上一轮的「最后一帧」不能拿来重发（车机解码器已重建，
@@ -603,9 +610,8 @@ class VideoSender(
         if (lastFrameAtMs == 0L || now - lastFrameAtMs < IDLE_RESEND_AFTER_MS) return
         if (now - lastIdleResendAt < IDLE_RESEND_INTERVAL_MS) return
         lastIdleResendAt = now
-        suppressFrameLog = true
         try {
-            sendFrameFromNals(nals, true, output)
+            sendFrameFromNals(nals, true, output, idleResend = true)
             idleResendCount++
             if (idleResendCount == 1L || idleResendCount % 30L == 0L) {
                 log(
@@ -615,8 +621,6 @@ class VideoSender(
             }
         } catch (error: Exception) {
             log("VIDEO: 空闲保活重发失败 - ${error.message}")
-        } finally {
-            suppressFrameLog = false
         }
     }
 
@@ -1212,6 +1216,7 @@ class VideoSender(
         nalUnits: List<ByteArray>,
         keyFrame: Boolean,
         output: java.io.OutputStream,
+        idleResend: Boolean = false,
     ) {
         if (!configSent) {
             log("VIDEO: 丢弃一帧（config 尚未发送）")
@@ -1236,7 +1241,7 @@ class VideoSender(
         // keepAlive/config 帧在两种模式下都不加密。头只能构造一次——ChaCha 的 AAD
         // 必须是最终发出的那 128 字节（重复构造会带不同时间戳，对端解密必然失败）。
         // 构造头 + 加密 + 写字节 + 计数器自增必须整体串行（见 [writeLock]）。
-        synchronized(writeLock) {
+        val firstSourceFrame = synchronized(writeLock) {
             val header =
                 buildHeader(
                     OP_FRAME,
@@ -1256,12 +1261,16 @@ class VideoSender(
             output.write(header)
             output.write(sealed)
             output.flush()
+            val first = !idleResend && lastSourceFrameSent == 0L
+            if (!idleResend) lastSourceFrameSent = android.os.SystemClock.elapsedRealtime()
+            first
         }
         framesSent++
+        if (firstSourceFrame) runCatching { onFirstSourceFrameSent?.invoke() }
         if (!passthrough) lastFrameAtMs = android.os.SystemClock.uptimeMillis()
         framesSinceKeepAlive++
         bytesSinceKeepAlive += plain.size.toLong()
-        if (!suppressFrameLog && (keyFrame || framesSent <= 3 || framesSent % 150 == 0L)) {
+        if (!idleResend && (keyFrame || framesSent <= 3 || framesSent % 150 == 0L)) {
             log("VIDEO: 帧 #$framesSent ${plain.size}B${if (keyFrame) " (key)" else ""} 已发送")
         }
     }

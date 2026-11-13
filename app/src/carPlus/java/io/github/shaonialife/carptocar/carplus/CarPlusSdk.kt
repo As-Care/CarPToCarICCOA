@@ -4,6 +4,7 @@ import android.content.Context
 import android.os.Handler
 import android.os.Looper
 import android.os.Process
+import android.os.SystemClock
 import android.util.Base64
 import android.util.Log
 import android.view.MotionEvent
@@ -15,6 +16,7 @@ import com.ucar.vehiclesdk.UCarAdapter
 import com.ucar.vehiclesdk.UCarCommon.WorkMode
 import com.ucar.vehiclesdk.UCarConfig
 import com.ucar.vehiclesdk.UCarConnectState
+import io.github.shaonialife.carptocar.input.TouchReports.Contact
 import io.github.shaonialife.carptocar.util.Bg
 import io.github.shaonialife.carptocar.util.SysShell
 import java.security.SecureRandom
@@ -31,7 +33,7 @@ internal object CarPlusSdk {
     private val advertisingStatus = Regex("""^onAdvertisingSetStarted status (\d+)\b""")
 
     private val main = Handler(Looper.getMainLooper())
-    var report: ((status: String?, log: String) -> Unit)? = null
+    var report: ((status: String?, log: String?) -> Unit)? = null
 
     private var adapter: UCarAdapter? = null
     private var discovery: CarPlusDiscovery? = null
@@ -49,13 +51,15 @@ internal object CarPlusSdk {
     private var reconnectRetryAvailable = false
     private val reconnectRetry = Runnable { requestBackgroundReconnect() }
     private var casting = false
+    var castStartedAt = 0L
+        private set
+    var sourceFrameSeen = false
+        private set
     private var castFrameRateRequest: Any? = null
     private var requestedCastFps: Int? = null
     private var surface: Surface? = null
     private var encodedOutput = false
-    private var touchDown = false
-    private var touchX = 0
-    private var touchY = 0
+    private val touchGesture = CarPlusTouchGesture(::sendTouch)
 
     private val connection = object : ICarConnectListener {
         override fun onPinCode(code: String?, deviceName: String?) = onMain {
@@ -336,11 +340,16 @@ internal object CarPlusSdk {
             return
         }
         if (!casting) {
-            requestFrameRateAfterFirstFrame(requestedFps)
+            castStartedAt = SystemClock.elapsedRealtime()
+            sourceFrameSeen = false
+            watchFirstCastFrame(requestedFps)
             casting = runCatching {
                 adapter?.startCast(target, CarPlusVideo.WIDTH, CarPlusVideo.HEIGHT) == true
             }.getOrDefault(false)
-            if (!casting) cancelFrameRateRequest()
+            if (!casting) {
+                castStartedAt = 0L
+                cancelFrameRateRequest()
+            }
         }
         if (connected) {
             updateStatus(
@@ -351,16 +360,18 @@ internal object CarPlusSdk {
         }
     }
 
-    private fun requestFrameRateAfterFirstFrame(fps: Int) {
-        if (requestedCastFps == fps) return
+    private fun watchFirstCastFrame(fps: Int) {
         val token = Any()
         castFrameRateRequest = token
         CarPlusVideoTap.onNextFrame {
             // The first frame means the phone's virtual display is ready to apply the request.
             main.post {
                 if (castFrameRateRequest !== token || !wanted || !connected || !casting) return@post
-                if (CarPlusVideoTap.request.fps != fps) return@post
                 castFrameRateRequest = null
+                sourceFrameSeen = true
+                report?.invoke(null, null)
+                if (CarPlusVideoTap.request.fps != fps) return@post
+                if (requestedCastFps == fps) return@post
                 val send = runCatching { adapter?.let { CarPlusFrameRateControl.request(it, fps) } }
                 val result = send.getOrNull()
                 if (result == null) {
@@ -390,37 +401,34 @@ internal object CarPlusSdk {
 
     private fun pauseCast() {
         cancelFrameRateRequest()
+        castStartedAt = 0L
+        sourceFrameSeen = false
         if (!casting) return
-        if (touchDown) sendTouch(MotionEvent.ACTION_CANCEL)
-        touchDown = false
+        touchGesture.cancel()
         casting = false
         runCatching { adapter?.pauseCast() }
     }
 
-    fun onTouch(down: Boolean, x: Int, y: Int) {
-        if (!casting || !down && !touchDown) return
-        val action = when {
-            !down -> MotionEvent.ACTION_UP
-            touchDown -> MotionEvent.ACTION_MOVE
-            else -> MotionEvent.ACTION_DOWN
-        }
-        // Some receivers clear the coordinates on release. Keep the last position for that report.
-        if (down || x != 0 || y != 0) {
-            touchX = x
-            touchY = y
-        }
-        if (action == MotionEvent.ACTION_MOVE) {
-            sendTouch(action)
-        } else {
-            val accepted = sendTouch(action)
-            touchDown = down && accepted
-            Log.d("CarPlusTouch", "${MotionEvent.actionToString(action)} ($touchX,$touchY) accepted=$accepted")
-        }
+    fun onTouch(contacts: List<Contact>, viewport: CarPlusVideo.Viewport) {
+        if (casting) touchGesture.update(contacts, viewport)
     }
 
-    private fun sendTouch(action: Int): Boolean = runCatching {
-        adapter?.sendTouchEvent(action, 1, intArrayOf(0), intArrayOf(touchX), intArrayOf(touchY)) == true
-    }.getOrDefault(false)
+    private fun sendTouch(action: Int, pointers: List<Contact>): Boolean {
+        val count = pointers.size
+        val accepted = runCatching {
+            adapter?.sendTouchEvent(
+                action,
+                count,
+                IntArray(count) { pointers[it].slot },
+                IntArray(count) { pointers[it].xPixels },
+                IntArray(count) { pointers[it].yPixels },
+            ) == true
+        }.getOrDefault(false)
+        if (action != MotionEvent.ACTION_MOVE) {
+            Log.d("CarPlusTouch", "${MotionEvent.actionToString(action)} · ${count} 指 · accepted=$accepted")
+        }
+        return accepted
+    }
 
     private fun config(context: Context, request: CarPlusVideo.Request): UCarConfig {
         val canvas = request.canvas ?: CarPlusVideo.defaultSize

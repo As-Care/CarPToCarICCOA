@@ -9,11 +9,13 @@ import android.content.Context
 import android.content.Intent
 import android.os.Build
 import androidx.core.app.NotificationCompat
+import io.github.shaonialife.carptocar.BuildConfig
 import io.github.shaonialife.carptocar.EXTRA_CAR_APPROACH
 import io.github.shaonialife.carptocar.MainActivity
 import io.github.shaonialife.carptocar.SessionController
 import io.github.shaonialife.carptocar.util.Bg
 import io.github.shaonialife.carptocar.util.DebugFileLog
+import io.github.shaonialife.carptocar.util.SysShell
 
 /**
  * 靠近车机自动启动（2026-10-30）——**静默检测**的实现方式。
@@ -40,9 +42,9 @@ import io.github.shaonialife.carptocar.util.DebugFileLog
  * 界面已经在后台时走 `onNewIntent`，只重新武装一次，不重建界面。
  *
  * 拉起失败（Android 10+ 的后台启动限制 / ROM 禁止自启动）时**不一定能立刻知道**：
- * 系统是静默拒绝的——不报错、界面就是不出现。所以拉起后会隔 3.5 秒核对
- * [AppUiPresence]：没盖到章就发一条「车机已靠近，但系统没让 App 到前台」的通知，
- * 告诉用户去开「显示在其他应用上层」。这一条是兜底，不是常态：权限给到位时它不会出现。
+ * 系统是静默拒绝的——不报错、界面就是不出现。所以拉起后会隔 2 秒核对
+ * [AppUiPresence]：如果主界面没收到启动请求，支持原生 ICCOA 的构建会通过 Root
+ * 显式启动本应用。仍未启动时，发通知让用户打开界面。
  *
  * 通知只在**失败**时发；成功时通知栏里那条是保活服务（CarPlayService）的，不会重复。
  */
@@ -116,38 +118,29 @@ class CarApproachReceiver : BroadcastReceiver() {
                 now = System.currentTimeMillis(),
             )
         if (decision != CarApproachPolicy.Decision.TRIGGER) {
-            // 静默原则：非目标设备、开关关闭等常态一律不写日志（耳机/手表每天都在连）。
-            if (decision == CarApproachPolicy.Decision.SUPPRESSED ||
-                decision == CarApproachPolicy.Decision.SESSION_RUNNING
-            ) {
-                DebugFileLog.append(
-                    context,
-                    "APPROACH: 车机已靠近，但" +
-                        (if (decision == CarApproachPolicy.Decision.SESSION_RUNNING) "已有会话" else "刚手动断开过") +
-                        "——跳过本次自动启动",
-                )
+            if (!TargetDevicePrefs.matches(target, address)) return
+            val reason = when (decision) {
+                CarApproachPolicy.Decision.DISABLED -> "自动启动已关闭"
+                CarApproachPolicy.Decision.SESSION_RUNNING -> "已有会话"
+                CarApproachPolicy.Decision.SUPPRESSED -> "刚手动断开过"
+                CarApproachPolicy.Decision.THROTTLED -> "本次靠近已触发过"
+                else -> return
             }
+            DebugFileLog.append(context, "APPROACH: 已收到目标车机蓝牙连接事件，跳过自动启动（$reason）")
             return
         }
 
-        // ---- 只做一件事：把界面叫到前台，连接交给前台 ----
-        // 顺序仍按「先动作、后写日志」：磁盘 IO 不挡在拉起界面前面。
-        CarApproachPrefs.markTriggered(context)
-        val launched = launchApp(context)
-        DebugFileLog.append(
-            context,
-            "APPROACH: 检测到目标车机「${target.name}」靠近——" +
-                if (launched) "已拉起 App，交给前台自动发起连接" else "拉起 App 被系统拒绝（需允许本应用「自启动/后台弹界面」）",
-        )
+        val launchedAt = System.currentTimeMillis()
+        CarApproachPrefs.markTriggered(context, launchedAt)
+        DebugFileLog.append(context, "APPROACH: 已收到目标车机「${target.name}」蓝牙连接事件，正在请求打开 App")
+        launchApp(context, target, launchedAt)
     }
 
     /**
      * 把 App 带到前台。带 [EXTRA_CAR_APPROACH]，界面侧据此重新武装自动连接；
      * Activity 已在后台时走 `onNewIntent`，不重建界面。
-     *
-     * @return true = 已成功把启动请求交给系统；false = 被后台启动限制拦下
      */
-    private fun launchApp(context: Context): Boolean {
+    private fun launchApp(context: Context, target: TargetDevicePrefs.Target, launchedAt: Long) {
         // 后台启动界面的豁免之一就是「持有显示在其他应用上层」——没有它，MagicOS 会
         // 静默拦掉这次启动（不抛异常、界面不出现）。这里先留一条线索，事后看日志能一眼定因。
         if (!android.provider.Settings.canDrawOverlays(context)) {
@@ -156,7 +149,6 @@ class CarApproachReceiver : BroadcastReceiver() {
                 "APPROACH: 未授予「显示在其他应用上层」——系统可能拒绝后台打开界面（静默，不报错）",
             )
         }
-        val launchedAt = System.currentTimeMillis()
         val launch =
             Intent(context, MainActivity::class.java).apply {
                 addFlags(
@@ -169,38 +161,65 @@ class CarApproachReceiver : BroadcastReceiver() {
         val ok =
             runCatching { context.startActivity(launch) }
                 .onFailure {
-                    // 后台启动 Activity 被系统拦截（Android 10+ 限制）：不弹通知、不刷日志，
-                    // App 下次被打开时仍会按「启动后自动连接」走一遍，功能不会丢。
                     DebugFileLog.append(
                         context,
-                        "APPROACH: 后台拉起 App 被系统拒绝（${it.javaClass.simpleName}）——请允许本应用「自启动/后台弹界面」",
+                        "APPROACH: 常规启动请求失败（${it.javaClass.simpleName}）",
                     )
                 }.isSuccess
-        if (ok) verifyBroughtUp(context, launchedAt)
-        return ok
+        verifyBroughtUp(context, target, launch, launchedAt, ok)
     }
 
     /**
      * 核对「拉起是否真的生效」（2026-10-30）。
      *
      * 系统拦后台启动是**静默**的：不抛异常，界面就是不出现。用户看到的是
-     * 「车机连上了、手机什么都没有」。这里 3.5 秒后比对 [AppUiPresence] 的盖章，
-     * 没盖就发一条通知——至少让这次失败看得见、点得开，并说清要去开哪条权限。
+     * 「车机连上了、手机什么都没有」。这里 2 秒后比对 [AppUiPresence] 的盖章，
+     * 没收到请求时尝试显式启动，再检查是否需要发通知。
      */
     private fun verifyBroughtUp(
         context: Context,
+        target: TargetDevicePrefs.Target,
+        launch: Intent,
         launchedAt: Long,
+        waitForRegularLaunch: Boolean,
     ) {
-        Bg.run("approach-verify") {
-            Thread.sleep(3_500L)
-            if (AppUiPresence.lastBringUpAt >= launchedAt) return@run
-            DebugFileLog.append(
-                context,
-                "APPROACH: 系统没有让 App 到前台（后台启动被拦）——已发通知提示授权",
-            )
-            runCatching { notifyLaunchBlocked(context) }
+        // 冷进程只有接收器时，保留广播生命周期直到启动核验结束。
+        val pending = goAsync()
+        Bg.run("approach-launch") {
+            try {
+                if (waitForRegularLaunch) Thread.sleep(2_000L)
+                if (!shouldRetryLaunch(context, target, launchedAt)) return@run
+
+                if (BuildConfig.CAR_PLUS_RUNTIME) {
+                    DebugFileLog.append(context, "APPROACH: 常规启动未打开 App，正在通过 Root 重试")
+                    val component = requireNotNull(launch.component).flattenToString()
+                    val result = SysShell.execAsRoot(
+                        "/system/bin/am start -W --user current " +
+                            "-f ${launch.flags} -n $component --ez $EXTRA_CAR_APPROACH true",
+                        timeoutMs = 2_500L,
+                    )
+                    if (!result.ok) {
+                        DebugFileLog.append(context, "APPROACH: Root 启动失败（${result.exitCode}）：${result.output.take(250)}")
+                    }
+                }
+
+                if (shouldRetryLaunch(context, target, launchedAt)) {
+                    DebugFileLog.append(context, "APPROACH: 主界面仍未收到启动请求，尝试显示手动打开通知")
+                    runCatching { notifyLaunchBlocked(context) }
+                }
+            } finally {
+                pending.finish()
+            }
         }
     }
+
+    private fun shouldRetryLaunch(context: Context, target: TargetDevicePrefs.Target, launchedAt: Long): Boolean =
+        AppUiPresence.lastBringUpAt < launchedAt &&
+            CarApproachPrefs.lastTriggerAt(context) == launchedAt &&
+            CarApproachPrefs.enabled(context) &&
+            CarApproachPrefs.aclConnected(context) &&
+            !CarApproachPrefs.suppressed(context) &&
+            TargetDevicePrefs.get(context)?.address.equals(target.address, ignoreCase = true)
 
     private fun notifyLaunchBlocked(context: Context) {
         val manager = context.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
@@ -223,12 +242,11 @@ class CarApproachReceiver : BroadcastReceiver() {
                 0,
                 Intent(context, MainActivity::class.java).apply {
                     flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP
+                    putExtra(EXTRA_CAR_APPROACH, true)
                 },
                 PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
             )
-        val hint =
-            "系统拒绝了「后台打开界面」，本次没能自动连上。请到 设置 → 应用 → 特殊访问权限 → " +
-                "显示在其他应用上层，允许本应用；或点这里手动打开。"
+        val hint = "点此打开 App 并连接车机。可在系统设置里检查本应用的自启动和「显示在其他应用上层」权限。"
         manager.notify(
             BLOCKED_NOTIFICATION_ID,
             NotificationCompat

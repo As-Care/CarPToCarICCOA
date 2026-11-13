@@ -13,6 +13,7 @@ import android.os.IBinder
 import android.os.Looper
 import androidx.core.app.NotificationCompat
 import io.github.shaonialife.carptocar.MainActivity
+import io.github.shaonialife.carptocar.R
 import io.github.shaonialife.carptocar.SessionController
 import io.github.shaonialife.carptocar.bt.CarIdleGuard
 import io.github.shaonialife.carptocar.util.DebugFileLog
@@ -248,6 +249,7 @@ class CarPlayService : Service() {
 
         /** 通知上的「断开」——直接断开并停服务，不依赖界面是否存活。 */
         const val ACTION_DISCONNECT = "io.github.shaonialife.carptocar.action.NOTIFICATION_DISCONNECT"
+        const val ACTION_RECONNECT_CAR_PLUS = "io.github.shaonialife.carptocar.action.NOTIFICATION_RECONNECT_CAR_PLUS"
 
         /** 镜像模式：授权后由 MainActivity 写入；服务重声明 FGS 类型后方可创建虚拟屏。 */
         @Volatile
@@ -316,10 +318,22 @@ class CarPlayService : Service() {
         return NotificationCompat
             .Builder(this, CHANNEL_ID)
             .setSmallIcon(android.R.drawable.stat_sys_data_bluetooth)
-            .setContentTitle("CarPToCarL · 车机连接")
+            .setContentTitle("${getString(R.string.app_name)} · 车机连接")
             .setContentText(text)
             .setStyle(NotificationCompat.BigTextStyle().bigText(text))
             .setContentIntent(contentIntent)
+            .apply {
+                if (SessionController.canReconnectCarPlusFromNotification(this@CarPlayService)) {
+                    val reconnectIntent = PendingIntent.getBroadcast(
+                        this@CarPlayService,
+                        2,
+                        Intent(this@CarPlayService, NotificationActionReceiver::class.java)
+                            .setAction(ACTION_RECONNECT_CAR_PLUS),
+                        PendingIntent.FLAG_IMMUTABLE,
+                    )
+                    addAction(0, "重新连接 Car+", reconnectIntent)
+                }
+            }
             .addAction(0, "断开", disconnectIntent)
             .addAction(0, "打开界面", contentIntent)
             .setCategory(NotificationCompat.CATEGORY_TRANSPORT)

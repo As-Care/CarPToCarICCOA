@@ -140,4 +140,20 @@ class ConnectBudgetTest {
         assertTrue("已推流的一轮不能报「未连上」：$verdict", verdict!!.contains("已推流"))
         assertTrue(!verdict.contains("✗"))
     }
+
+    @Test
+    fun progressRetainsLastFailureAcrossRetryUntilFirstFrame() {
+        budget.begin("test")
+        budget.enter(ConnectStage.WIFI)
+        now = ConnectStage.WIFI.budgetMs + 1
+        assertEquals(ConnectStage.WIFI, budget.progress().stage)
+        assertTrue(budget.progress().overdue)
+        budget.end()
+        assertEquals("未能连接车机热点", budget.progress().lastFailure)
+        budget.begin("retry")
+        assertEquals("未能连接车机热点", budget.progress().lastFailure)
+        budget.markStreaming()
+        assertNull(budget.progress().lastFailure)
+        assertEquals(ConnectStage.STREAMING, budget.progress().stage)
+    }
 }

@@ -12,6 +12,7 @@ import android.os.Messenger
 import android.os.ParcelFileDescriptor
 import android.os.RemoteException
 import android.view.Surface
+import io.github.shaonialife.carptocar.input.TouchReports.Contact
 
 /** Runs the SDK outside the process whose default network is bound to CarPlay. */
 internal class CarPlusReceiverService : Service() {
@@ -41,6 +42,8 @@ internal class CarPlusReceiverService : Service() {
                                 putString(STATUS_TEXT, status)
                                 putString(LOG_TEXT, log)
                                 putBoolean(SOURCE_CONNECTED, CarPlusSdk.isConnected)
+                                putLong(CAST_STARTED_AT, CarPlusSdk.castStartedAt)
+                                putBoolean(SOURCE_FRAME_SEEN, CarPlusSdk.sourceFrameSeen)
                             }
                         })
                     } catch (_: RemoteException) {
@@ -85,8 +88,14 @@ internal class CarPlusReceiverService : Service() {
             }
             AUDIO_TARGET -> CarPlusAudioTap.setTarget(message.replyTo)
             RECONNECT_IF_PAIRED -> CarPlusSdk.reconnectIfPaired(restartCurrent = true)
-            TOUCH_PRESSED, TOUCH_RELEASED -> {
-                CarPlusSdk.onTouch(message.what == TOUCH_PRESSED, message.arg1, message.arg2)
+            TOUCH_REPORT -> {
+                val report = message.data.getIntArray(TOUCH_REPORT_VALUE) ?: return@Handler false
+                if (report.size !in 8..12 || report.size % 4 != 0) return@Handler false
+                val viewport = CarPlusVideo.Viewport(report[0], report[1], report[2], report[3])
+                val contacts = (4 until report.size step 4).map { index ->
+                    Contact(report[index], report[index + 1], report[index + 2], report[index + 3] != 0)
+                }
+                CarPlusSdk.onTouch(contacts, viewport)
             }
             else -> return@Handler false
         }
@@ -116,8 +125,7 @@ internal class CarPlusReceiverService : Service() {
         const val SURFACE = 2
         const val STOP = 3
         const val STATUS = 4
-        const val TOUCH_PRESSED = 5
-        const val TOUCH_RELEASED = 6
+        private const val TOUCH_REPORT = 5
         const val AUDIO_TARGET = 7
         const val VIDEO_TARGET = 8
         const val VIDEO_CONFIG = 9
@@ -132,5 +140,26 @@ internal class CarPlusReceiverService : Service() {
         const val STATUS_TEXT = "status"
         const val LOG_TEXT = "log"
         const val SOURCE_CONNECTED = "sourceConnected"
+        const val CAST_STARTED_AT = "castStartedAt"
+        const val SOURCE_FRAME_SEEN = "sourceFrameSeen"
+        private const val TOUCH_REPORT_VALUE = "touchReport"
+
+        fun touchMessage(contacts: List<Contact>, viewport: CarPlusVideo.Viewport): Message {
+            val report = IntArray(4 + contacts.size * 4)
+            report[0] = viewport.x
+            report[1] = viewport.y
+            report[2] = viewport.width
+            report[3] = viewport.height
+            contacts.forEachIndexed { index, contact ->
+                val offset = 4 + index * 4
+                report[offset] = contact.slot
+                report[offset + 1] = contact.xPixels
+                report[offset + 2] = contact.yPixels
+                report[offset + 3] = if (contact.down) 1 else 0
+            }
+            return Message.obtain(null, TOUCH_REPORT).apply {
+                data = Bundle().apply { putIntArray(TOUCH_REPORT_VALUE, report) }
+            }
+        }
     }
 }

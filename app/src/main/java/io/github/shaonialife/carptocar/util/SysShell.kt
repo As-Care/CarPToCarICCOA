@@ -4,7 +4,7 @@ import android.os.Looper
 import java.util.concurrent.TimeUnit
 
 /**
- * 以**本应用自身 uid** 执行一条 shell（`sh -c`）。
+ * 默认以本应用自身 UID 执行 shell 命令。需要 Root 的调用显式使用 [execAsRoot]。
  *
  * 历史背景：旧实现走 Shizuku 的 `IShizukuService.newProcess`，等同于 adb shell，
  * 能力很强但要求用户额外装 Shizuku 并授权——一旦未就绪，整个连接流程会被门禁拦住。
@@ -35,17 +35,24 @@ object SysShell {
     fun exec(
         cmd: String,
         timeoutMs: Long = 6_000L,
-    ): Result {
+    ): Result = exec(listOf("sh", "-c", cmd), timeoutMs)
+
+    fun execAsRoot(
+        cmd: String,
+        timeoutMs: Long,
+    ): Result = exec(listOf("su", "-c", cmd), timeoutMs)
+
+    private fun exec(command: List<String>, timeoutMs: Long): Result {
         if (Looper.myLooper() == Looper.getMainLooper()) {
             mainThreadViolations++
             violationSink?.invoke(
-                "SHELL: ⚠ 主线程调用 shell（第 $mainThreadViolations 次）cmd=${cmd.take(60)}" +
+                "SHELL: ⚠ 主线程调用 shell（第 $mainThreadViolations 次）cmd=${command.last().take(60)}" +
                     "（$timeoutMs ms 上限）——应改用 Bg.run / 后台线程",
             )
         }
         var process: Process? = null
         return try {
-            val started = ProcessBuilder("sh", "-c", cmd).redirectErrorStream(true).start()
+            val started = ProcessBuilder(command).redirectErrorStream(true).start()
             process = started
             val output = StringBuilder()
             val reader =

@@ -886,6 +886,32 @@ object SessionController {
     @Volatile
     var phaseHint: String? = null
 
+    internal fun carPlusConnectionMessage(): String? {
+        val progress = connectBudget.progress()
+        val stage = progress.stage
+        if (sessionWanted && wifiLinkLost) return "车机热点已断开，等待恢复"
+        if (stage == null && !sessionStarting.get() && progress.lastFailure != null) return progress.lastFailure
+        if (stage == ConnectStage.WIFI && boundCarSsid == lastGoodEndpoint?.ssid && wifiConnector?.currentNetwork != null) {
+            return "车机热点已连接，等待车机响应"
+        }
+        if (stage != null && stage != ConnectStage.STREAMING) {
+            if (progress.overdue && stage != ConnectStage.FIRST_FRAME) {
+                return "${stage.waitingMessage}，已超过预计时间"
+            }
+            if (stage != ConnectStage.ENDPOINT) return stage.waitingMessage
+        }
+        return phaseHint ?: stage?.takeIf { it != ConnectStage.STREAMING }?.waitingMessage
+    }
+
+    internal val lastConnectionFailure: String? get() = connectBudget.progress().lastFailure
+
+    internal fun carPlusVideoMessage(sender: VideoSender): String {
+        val progress = CarPlusReceiver.castProgress
+        val since = maxOf(sender.startedAt, progress.startedAt, progress.disconnectedAt)
+        val overdue = android.os.SystemClock.elapsedRealtime() - since >= ConnectStage.FIRST_FRAME.budgetMs
+        return progress.waitingMessage(overdue)
+    }
+
     /** 取消「连接中」：停链路 + 置取消标志，卡在错误网络/等待回连时用户可主动脱身。 */
     fun cancelConnecting(context: Context) {
         connectCancelled = true
@@ -913,6 +939,10 @@ object SessionController {
         if (videoSender?.isRunning == true) return
         if (sessionStarting.compareAndSet(true, false)) {
             connectCancelled = true
+            if (BuildConfig.CAR_PLUS) {
+                connectBudget.end(cause = "蓝牙链路断开", displayFailure = "车机蓝牙已断开")
+                phaseHint = "等待车机蓝牙重新连接"
+            }
             appendLog(">>> 本轮蓝牙链路断开——释放「会话处理中」，等待车机重连端点接手")
             // 未推流就断链 = 这一轮没连上：报文快照落盘（成功过的轮次在 markLinked 时已丢弃）
             SessionTrace.sessionEnd("蓝牙链路断开，未进入推流")
@@ -1550,14 +1580,30 @@ object SessionController {
     fun notificationSummary(): String {
         val hint = phaseHint
         return when {
-            BuildConfig.CAR_PLUS && videoSender?.isRunning == true ->
-                if (videoSender?.isVideoFlowing == true) "已连上车机，正在投放 ICCOA Car+ 画面"
-                else "已连上车机，等待 ICCOA Car+ 画面"
+            BuildConfig.CAR_PLUS -> {
+                val sender = videoSender?.takeIf { it.isRunning && currentClient?.isRetired != true }
+                when {
+                    sender != null && isCarPlusPictureReady(sender) -> "正在投屏"
+                    sender != null -> "车机已连接 · ${carPlusVideoMessage(sender)}"
+                    isCarOffline -> "车机已离线"
+                    else -> carPlusConnectionMessage() ?: "等待车机靠近"
+                }
+            }
             videoSender?.isRunning == true -> "已连上车机，正在镜像手机画面（点「断开」可停止）"
             sessionStarting.get() -> hint ?: "正在连接车机…"
             isSessionRunning() -> hint ?: "蓝牙已连上车机，等待它下发连接信息…"
             else -> hint ?: "空闲——等待车机靠近，或点「打开界面」查看"
         }
+    }
+
+    internal fun isCarPlusPictureReady(sender: VideoSender): Boolean =
+        CarPlusReceiver.castProgress.hasForwardedFrame(sender.lastSourceFrameSentAt)
+
+    internal fun canReconnectCarPlusFromNotification(context: Context): Boolean {
+        if (!BuildConfig.CAR_PLUS || disconnecting || connectCancelled) return false
+        val sender = videoSender ?: return false
+        return sender.isRunning && currentClient?.isRetired == false &&
+            !isCarPlusPictureReady(sender) && CarPlusReceiver.hasSystemCarPlus(context)
     }
 
     /**
@@ -1572,6 +1618,7 @@ object SessionController {
         }
         CarIdleGuard.cancel(context)
         if (isCarOffline) CarApproachPrefs.setOfflineCarAddress(context, null)
+        if (BuildConfig.CAR_PLUS) connectBudget.clearProgress()
         connectCancelled = false
         lastGoodEndpoint = null
         // 新一轮 = 新的一致性审计：清空上一轮的问题清单，并把输出口接到本控制器的
@@ -1706,6 +1753,7 @@ object SessionController {
         // 配对中绝不能断——DiPlay 在隧道 iAP2 就绪前看到 RFCOMM 断开即判
         // bring-up failed 并拆整轮无线栈（含推流中的 AirPlay 会话，2026-10-16 实测）。
         phaseHint = null
+        if (BuildConfig.CAR_PLUS) connectBudget.clearProgress()
         CarPlayService.stop(context)
         if (keepAllPlayChannel) bluetoothServer?.pauseForReconnect() else bluetoothServer?.stop()
         bluetoothClient?.stop()
@@ -1837,7 +1885,7 @@ object SessionController {
             appendLog("0x5703 冗余凭据（会话推流中）——保持现有 WiFi 绑定与 ctrl 广播不变")
             return
         }
-        phaseHint = "拿到车机热点凭据，绑定 WiFi…"
+        phaseHint = if (BuildConfig.CAR_PLUS) "等待连接车机热点" else "拿到车机热点凭据，绑定 WiFi…"
         appendLog(">>> 拿到车机热点凭据（0x5703）——立即绑定 WiFi + 广播 _carplay-ctrl")
         // ctrl 广播已在 startConnection 时发布（catplay：连接前保持发布能力在线）。
         // 这里登记 SSID 并让注册对齐一次（手机若已手动连在车机热点上、自动加入不可用
@@ -1951,7 +1999,8 @@ object SessionController {
             promptForgetSavedNetworkIfAny(wifi.ssid)
             if (connectCancelled) return WifiCarPlayConnector.JoinResult.Unavailable
         }
-        phaseHint = "正在加入车机热点 ${wifi.ssid}…（不影响移动数据）"
+        phaseHint = if (BuildConfig.CAR_PLUS) "等待连接车机热点 ${wifi.ssid}"
+        else "正在加入车机热点 ${wifi.ssid}…（不影响移动数据）"
         val result = joinCarWifiOnce(connector, wifi, force)
         if (result is WifiCarPlayConnector.JoinResult.Joined) {
             boundCarSsid = wifi.ssid
@@ -3999,13 +4048,17 @@ object SessionController {
                 phaseHint = "手机不在车机热点——请到 WLAN 设置加入 ${endpoint.ssid}"
                 appendLog(">>> [$source] 手机当前不在该热点——请到 设置>WLAN 加入 \"${endpoint.ssid}\" 后断开重连")
                 // 这一轮到此为止（没有配对线程会接手），必须自己收尾，否则只有「本轮开始」。
-                connectBudget.end(
-                    cause = "手机没加入车机热点 \"${endpoint.ssid}\"",
-                    keywords = "手机当前不在该热点 / 入网",
-                )
+                if (!BuildConfig.CAR_PLUS || !connectCancelled) {
+                    connectBudget.end(
+                        cause = "手机没加入车机热点 \"${endpoint.ssid}\"",
+                        keywords = "手机当前不在该热点 / 入网",
+                        displayFailure = "未能连接车机热点，请检查手机 WLAN",
+                    )
+                }
                 sessionStarting.set(false)
                 return@proceed
             }
+            if (BuildConfig.CAR_PLUS) phaseHint = "车机热点已连接，等待车机响应"
             // 网络绑定完成：ctrl 广播重新注册（落到车机所在网络），同时开始后台 mDNS 发现。
             // 两者都发生在等邀请期间，不额外占用时间。
             val reuseAdvertisement = alreadyBound && source == "车机 ctrl 邀请触发"
@@ -4375,6 +4428,8 @@ object SessionController {
                                 client.activeHost ?: EndpointHosts.candidates(client.currentEndpoint.ipAddresses).firstOrNull()
                             var resumeAfterCarAudio = false
                             var pausedMediaSession: MediaSession.Token? = null
+                            var loggedTouchFormat = false
+                            var loggedTwoFingerTouch = false
                             val eventChannelOk =
                                 client.connectEventChannel(sessionKey, setup) { command ->
                                 // 车机侧「有反应」计数：屏幕接管门（startScreenHandoverGate）用它
@@ -4459,8 +4514,8 @@ object SessionController {
                                             // 限频只压 MOVE（拖拽时每秒上百条）；
                                             // **抬起永远记录**——排查手势卡死时最需要看的就是
                                             // 「UP 到底有没有从车机发过来」。
-                                            // 只看 slot 0：多槽格式里 slot 1 常驻 (0,0)↑ 占位。
-                                            if (touchLogCount == 0) {
+                                            if (!loggedTouchFormat) {
+                                                loggedTouchFormat = true
                                                 // 双指能不能用，第一眼看这里：单指绝对坐标的
                                                 // 报文里根本没有第二个触点的位置，双指无从谈起。
                                                 appendLog(
@@ -4471,6 +4526,10 @@ object SessionController {
                                                             null -> "未知（按报文长度 ${report?.size} B 回退）"
                                                         },
                                                 )
+                                            }
+                                            if (!loggedTwoFingerTouch && contacts.count { it.down } >= 2) {
+                                                loggedTwoFingerTouch = true
+                                                appendLog("EVENT: 已收到车机双指触摸报告（${report?.size} B）")
                                             }
                                             val hasRelease = contacts.any { it.slot == 0 && !it.down }
                                             if (hasRelease || touchLogCount <= 30 || touchLogCount % 50 == 0) {
@@ -4483,8 +4542,8 @@ object SessionController {
                                             }
                                             touchLogCount++
                                             if (BuildConfig.CAR_PLUS) {
-                                                contacts.firstOrNull { it.slot == 0 }?.let { contact ->
-                                                    CarPlusReceiver.onTouch(contact, carPlusTouchWidth, carPlusTouchHeight)
+                                                videoSender?.takeIf { currentClient === client && !client.isRetired }?.let { sender ->
+                                                    CarPlusReceiver.onTouch(sender, contacts, carPlusTouchWidth, carPlusTouchHeight)
                                                 }
                                             } else {
                                                 contacts.forEach { TouchRouter.onContact(context.applicationContext, it) }
@@ -4858,9 +4917,29 @@ object SessionController {
                                                     null
                                                 },
                                             onSurfaceStopped = if (BuildConfig.CAR_PLUS) CarPlusReceiver::detach else null,
+                                            onFirstSourceFrameSent = if (BuildConfig.CAR_PLUS) {
+                                                {
+                                                    if (currentClient === client && !client.isRetired && !connectCancelled) {
+                                                        connectBudget.markStreaming()
+                                                    }
+                                                }
+                                            } else null,
                                             onEnded = ended@{
                                                 val endedSender = videoSender
                                                 if (currentClient !== client) return@ended
+                                                if (BuildConfig.CAR_PLUS && sessionWanted && !connectCancelled && !disconnecting) {
+                                                    val castProgress = CarPlusReceiver.castProgress
+                                                    val failure = when {
+                                                        !castProgress.connected -> "手机 Car+ 尚未连接，车机视频通道已断开"
+                                                        !castProgress.sourceFrameSeen -> "Car+ 尚未出画，车机视频通道已断开"
+                                                        else -> "收到 Car+ 画面后，车机视频通道断开"
+                                                    }
+                                                    connectBudget.end(
+                                                        cause = "车机视频通道断开",
+                                                        displayFailure = failure,
+                                                    )
+                                                    phaseHint = "车机视频通道已断开，等待重连"
+                                                }
                                                 if (BuildConfig.CAR_PLUS && sessionWanted &&
                                                     !connectCancelled && !disconnecting && client.retire()
                                                 ) {
@@ -5070,10 +5149,12 @@ object SessionController {
                     // 关掉（避免保活/重试路径上又打一次同一份小结）。推流中则保持计时，
                     // 由后续失败/结束时再收尾。
                     if (videoSender?.isRunning != true) {
-                        connectBudget.end(
-                            cause = phaseHint ?: "",
-                            keywords = "SETUP / /info / 配对 / 事件通道",
-                        )
+                        if (!BuildConfig.CAR_PLUS || !connectCancelled) {
+                            connectBudget.end(
+                                cause = phaseHint ?: "",
+                                keywords = "SETUP / /info / 配对 / 事件通道",
+                            )
+                        }
                     } else {
                         appendLog(connectBudget.summary())
                     }
@@ -5180,6 +5261,13 @@ object SessionController {
                             if (boundCarSsid == wifiConfig.ssid && wifiConnector?.currentNetwork != null) {
                                 continueWithNetwork(true)
                             } else {
+                                if (BuildConfig.CAR_PLUS && !connectCancelled) {
+                                    connectBudget.end(
+                                        cause = phaseHint ?: "",
+                                        keywords = "WIFI / 入网",
+                                        displayFailure = "未能连接车机热点，请检查手机 WLAN",
+                                    )
+                                }
                                 sessionStarting.set(false)
                             }
                             return@run

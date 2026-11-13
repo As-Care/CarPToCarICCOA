@@ -3,7 +3,10 @@ package io.github.shaonialife.carptocar.service
 import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
+import android.widget.Toast
+import io.github.shaonialife.carptocar.SessionController
 import io.github.shaonialife.carptocar.bt.CarIdleGuard
+import io.github.shaonialife.carptocar.carplus.CarPlusReceiver
 
 /**
  * 通知栏动作的接盘者（2026-10-30）。
@@ -22,14 +25,23 @@ class NotificationActionReceiver : BroadcastReceiver() {
         context: Context,
         intent: Intent,
     ) {
-        if (intent.action != CarPlayService.ACTION_DISCONNECT) return
-        CarIdleGuard.shutdown(
-            context,
-            reason = "用户在通知栏点了「断开」",
-            killProcess = true,
-            // 车机可能还连着蓝牙：置抑制，避免链路抖动立刻又把 App 拉起来
-            // （那会变成「断开 → 自动重连」的死循环）；车机真断开时自动解除。
-            suppressAutoStart = true,
-        )
+        when (intent.action) {
+            CarPlayService.ACTION_DISCONNECT -> CarIdleGuard.shutdown(
+                context,
+                reason = "用户在通知栏点了「断开」",
+                killProcess = true,
+                // 车机可能还连着蓝牙：置抑制，避免链路抖动立刻又把 App 拉起来
+                // （那会变成「断开 → 自动重连」的死循环）；车机真断开时自动解除。
+                suppressAutoStart = true,
+            )
+            CarPlayService.ACTION_RECONNECT_CAR_PLUS -> {
+                // 通知按周期刷新，点击时再次确认仍在等待画面。
+                if (!SessionController.canReconnectCarPlusFromNotification(context)) return
+                val sent = CarPlusReceiver.requestReconnect()
+                val message = if (sent) "正在请求重新连接 Car+" else "Car+ 接收端暂不可用"
+                SessionController.appendLog("ICCOA: 通知栏 · $message")
+                Toast.makeText(context, message, Toast.LENGTH_SHORT).show()
+            }
+        }
     }
 }
