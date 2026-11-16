@@ -19,7 +19,7 @@ import io.github.shaonialife.carptocar.bt.BtProfiles
 import io.github.shaonialife.carptocar.bt.BtSessionGate
 import io.github.shaonialife.carptocar.bt.Iap2BluetoothClient
 import io.github.shaonialife.carptocar.bt.Iap2BluetoothServer
-import io.github.shaonialife.carptocar.bt.CarApproachPrefs
+import io.github.shaonialife.carptocar.bt.CarIdlePrefs
 import io.github.shaonialife.carptocar.bt.CarIdleGuard
 import io.github.shaonialife.carptocar.bt.TargetDevicePrefs
 import io.github.shaonialife.carptocar.carplus.CarPlusReceiver
@@ -1416,7 +1416,7 @@ object SessionController {
      */
     fun isStreaming(): Boolean = videoSender?.isRunning == true && currentClient?.isRetired != true
 
-    val isCarOffline: Boolean get() = appContext?.let(CarApproachPrefs::offlineCarAddress) != null
+    val isCarOffline: Boolean get() = appContext?.let(CarIdlePrefs::offlineCarAddress) != null
 
     // 静止画面可以没有新帧，Car+ 源还在且已发过首帧就仍在投屏。
     fun isCarProjectionActive(sender: VideoSender? = videoSender): Boolean =
@@ -1443,7 +1443,7 @@ object SessionController {
             sender != null && isCarPlusPictureReady(sender) -> "正在投屏"
             sender != null -> "车机已连接 · ${carPlusVideoMessage(sender)}"
             isCarOffline -> "车机已离线"
-            else -> carPlusConnectionMessage() ?: "等待车机靠近"
+            else -> carPlusConnectionMessage() ?: "等待车机连接"
         }
     }
 
@@ -1468,7 +1468,7 @@ object SessionController {
             return
         }
         CarIdleGuard.cancel(context)
-        if (isCarOffline) CarApproachPrefs.setOfflineCarAddress(context, null)
+        if (isCarOffline) CarIdlePrefs.setOfflineCarAddress(context, null)
         connectBudget.clearProgress()
         connectCancelled = false
         lastGoodEndpoint = null
@@ -2675,23 +2675,23 @@ object SessionController {
      *
      * ICCOA 的 PCM 经 [AudioSender.feedPcm] 注入。
      *
-     * @return 音频通道是否真正启动（调用方据此决定是否补发 RECORD 激活新加入的流）
+     * @return 已启动的发送端，调用方补发 RECORD 激活该流
      */
-    fun startAudioChannel(
+    private fun startAudioChannel(
         context: Context,
         client: AirPlayClient,
         sharedSecret: ByteArray?,
         host: String?,
-    ): Boolean {
+    ): AudioSender? {
         if (sharedSecret == null) {
             // 明文会话（et=NONE）没有共享密钥可派生 DataStream 输出密钥：
             // 推出去的 RTP 车机无法解密。宁可不推，也不要制造「有包无声」的假象。
             appendLog("AUDIO: 明文会话（未配对）无共享密钥——跳过音频通道")
-            return false
+            return null
         }
         if (host == null) {
             appendLog("AUDIO: 无接收端可用地址，跳过音频通道")
-            return false
+            return null
         }
         return try {
             // 车机身份 → 只用于「本车机哪些音频档位踩过雷」的持久化记忆。
@@ -2707,15 +2707,11 @@ object SessionController {
                 appendLog("AUDIO: 本车机（$identity）有「全部档位拆链」的旧记忆，已自动清除并重试")
             }
             val candidates = client.audioCandidates(preferCompat = audioPreferCompat)
-            val ordered =
-                AudioProfileMemory.order(
-                    candidates,
-                    entry,
-                    preferPcm48Media = BuildConfig.CAR_PLUS_AUDIO_RELAY && !audioPreferCompat,
-                )
+            val preferPcm48Media = BuildConfig.CAR_PLUS_AUDIO_RELAY && !audioPreferCompat
+            val ordered = AudioProfileMemory.order(candidates, entry, preferPcm48Media)
             if (ordered.isEmpty()) {
                 appendLog("AUDIO: 没有可用音频档位（候选=${candidates.map { it.label }}）——仅推视频")
-                return false
+                return null
             }
             appendLog(
                 "AUDIO: 音频档位候选=${ordered.map { it.label }}" +
@@ -2748,7 +2744,7 @@ object SessionController {
             val audio = streamInfo
             if (profile == null || audio == null) {
                 appendLog("AUDIO: 全部候选档位协商失败（共 ${ordered.size} 档）——本次仅推视频")
-                return false
+                return null
             }
             activeAudioProfile = profile
             activeAudioReceiverKey = identity
@@ -2766,23 +2762,26 @@ object SessionController {
                     // 同步包目标端口：车机在 SETUP 应答里下发。缺了它就没有 RTP↔NTP 锚点，
                     // 接收端只能「按到达时刻猜」，严格的实现干脆不排播（2026-10-20 实测）。
                     controlPort = audio.controlPort,
+                    isMediaFallback = AudioProfileMemory.usedFallback(
+                        profile, ordered.first(), candidates, entry, preferPcm48Media,
+                    ),
                 )
             audioSender = sender
             if (!sender.startPassthrough(keepAlive = !BuildConfig.CAR_PLUS_AUDIO_RELAY)) {
                 audioSender = null
                 activeAudioProfile = null
                 activeAudioStartedAt = 0L
-                false
+                null
             } else {
                 startCallWatcher()
-                true
+                sender
             }
         } catch (error: Exception) {
             appendLog("AUDIO: 通道启动异常 - ${error.message}")
             audioSender = null
             activeAudioProfile = null
             activeAudioStartedAt = 0L
-            false
+            null
         }
     }
 
@@ -2864,6 +2863,7 @@ object SessionController {
                 streamType = profile.streamType,
                 adtsFrames = AudioTuning.RAW_SPF.adts,
                 controlPort = info.controlPort,
+                isMediaFallback = old.isMediaFallback,
             )
         // SETUP 后补 RECORD 激活新流。旧发送端继续工作，直到新流成功接管。
         if (!sender.startPassthrough(keepAlive = !BuildConfig.CAR_PLUS_AUDIO_RELAY) || !client.record()) {
@@ -2871,6 +2871,7 @@ object SessionController {
             appendLog("AUDIO: 新音频流启动或激活失败，保留原发送端")
             return false
         }
+        sender.acceptedByReceiver = true
         val replaced = synchronized(audioSenderLock) {
             if (currentClient !== client || audioSender !== old || !old.isRunning) {
                 false
@@ -2977,6 +2978,8 @@ object SessionController {
                 streamType = target.streamType,
                 adtsFrames = AudioTuning.RAW_SPF.adts,
                 controlPort = info.controlPort,
+                isMediaFallback = old.isMediaFallback,
+                isCallAudio = inCall,
             )
         audioSender = sender
         if (!sender.startPassthrough(keepAlive = !BuildConfig.CAR_PLUS_AUDIO_RELAY)) {
@@ -2989,7 +2992,7 @@ object SessionController {
         if (!inCall) rejectedCallProfileKey = null
         // 新流是在「会话已激活」之后加入的：按 AirPlay 语义必须补发 RECORD 纳入会话，
         // 否则车机对 SETUP 回 200、给端口，但不排播。
-        client.record()
+        sender.acceptedByReceiver = client.record()
         appendLog(
             "AUDIO: 音频流已切到 ${target.label}（dataPort=${info.dataPort} " +
                 "controlPort=${info.controlPort}）——音源不变，只换了接收端输出通路",
@@ -4458,15 +4461,16 @@ object SessionController {
                                         },
                                     )
                                 }
-                                val audioStarted = wantAudio && startAudioChannel(context, client, sessionKey, host)
-                                if (audioStarted) {
+                                val audio = if (wantAudio) startAudioChannel(context, client, sessionKey, host) else null
+                                if (audio != null) {
                                     // 流在 RECORD 之后加入：AirPlay 语义要求再发一次 RECORD
                                     // 把新流纳入已激活的会话。缺这一步时车机对 SETUP 回 200
                                     // 并给 dataPort，但不会真正播放（2026-10-17 奥迪实测：
                                     // 音频包持续发送、采集内容非零，车机无声）。
                                     appendLog("AUDIO: 音频流已加入——补发 RECORD 激活（流后加入会话）")
                                     val recording = client.record()
-                                    if (recording && BuildConfig.CAR_PLUS_AUDIO_RELAY) CarPlusReceiver.startAudio()
+                                    audio.acceptedByReceiver = recording
+                                    if (recording) CarPlusReceiver.startAudio()
                                 }
                             } else {
                                 // 屏幕流 SETUP 失败：会话已经死了，但旧实现到这里什么都不说，

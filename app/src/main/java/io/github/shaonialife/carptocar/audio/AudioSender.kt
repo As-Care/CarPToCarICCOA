@@ -41,9 +41,9 @@ class AudioSender(
      * 发送采样率（Hz）：必须与 SETUP 协商出的格式一致（48k 主选，车机只支持
      * 44.1k 时由 AirPlayClient 协商下发）。默认 48k。
      */
-    private val sampleRate: Int = 48_000,
+    internal val sampleRate: Int = 48_000,
     /** 负载编码：PCM（type=100 通路）或 AAC-LC（type=102 通路）。 */
-    private val codec: AudioCodec = AudioCodec.PCM,
+    internal val codec: AudioCodec = AudioCodec.PCM,
     /** RTP 流类型，仅用于日志（PT 与 SETUP 的 type 保持一致）。 */
     private val streamType: Long = 100L,
     /** AAC 帧是否补 ADTS 头（见 [AudioTuning.ADTS]，排查车机解码链用）。 */
@@ -53,6 +53,8 @@ class AudioSender(
      * 发一个 [AudioSyncPacket] 建立 RTP↔NTP 锚点；0 = 车机没给（旧车机），只发音频。
      */
     private val controlPort: Int = 0,
+    internal val isMediaFallback: Boolean = false,
+    internal val isCallAudio: Boolean = false,
 ) {
     companion object {
         const val CHANNELS = 2
@@ -186,6 +188,10 @@ class AudioSender(
     private var lastSendGapLoggedAt = 0L
 
     val isRunning: Boolean get() = running.get()
+
+    /** Result of RECORD for this RTP stream. Null while activation is pending. */
+    @Volatile
+    internal var acceptedByReceiver: Boolean? = null
 
     /** Starts the negotiated RTP stream. ICCOA supplies the samples through [feedPcm]. */
     fun startPassthrough(keepAlive: Boolean = true): Boolean {

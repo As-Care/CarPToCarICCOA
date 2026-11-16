@@ -4,19 +4,24 @@ import android.app.AlarmManager
 import android.app.KeyguardManager
 import android.app.NotificationManager
 import android.app.PendingIntent
+import android.bluetooth.BluetoothDevice
+import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
+import android.content.IntentFilter
 import android.os.Handler
 import android.os.Looper
 import android.os.PowerManager
 import android.os.Process
 import android.os.SystemClock
+import androidx.core.content.ContextCompat
+import androidx.core.content.IntentCompat
 import io.github.shaonialife.carptocar.SessionController
 import io.github.shaonialife.carptocar.service.CarIdleReceiver
 import io.github.shaonialife.carptocar.service.CarPlayService
 import io.github.shaonialife.carptocar.util.DebugFileLog
 
-/** Stops the session when the car has been offline for 30 seconds and projection has ended. */
+/** 车机断开 30 秒且投屏结束后，停止本次会话。 */
 object CarIdleGuard {
     /** 与 [CarIdleReceiver] 约好的内部动作（只在应用内显式广播，不对外导出）。 */
     const val ACTION_IDLE_TIMEOUT = "io.github.shaonialife.carptocar.action.CAR_IDLE_TIMEOUT"
@@ -28,24 +33,45 @@ object CarIdleGuard {
     private var scheduledCheck: Runnable? = null
     private var shutdownGeneration = 0
 
-    fun onCarDisconnected(context: Context, address: String) {
+    /** 只在本应用进程运行时监控车机链路，用于离车清理。 */
+    fun registerBluetoothMonitor(context: Context) {
+        val filter = IntentFilter().apply {
+            addAction(BluetoothDevice.ACTION_ACL_CONNECTED)
+            addAction(BluetoothDevice.ACTION_ACL_DISCONNECTED)
+        }
+        ContextCompat.registerReceiver(
+            context,
+            object : BroadcastReceiver() {
+                override fun onReceive(context: Context, intent: Intent) {
+                    if (!SessionController.hasCarWorkToStop()) return
+                    val address = runCatching {
+                        IntentCompat.getParcelableExtra(
+                            intent, BluetoothDevice.EXTRA_DEVICE, BluetoothDevice::class.java,
+                        )?.address
+                    }.getOrNull() ?: return
+                    when (intent.action) {
+                        BluetoothDevice.ACTION_ACL_CONNECTED -> {
+                            if (address.equals(departure?.address, ignoreCase = true)) cancel(context)
+                        }
+                        BluetoothDevice.ACTION_ACL_DISCONNECTED -> {
+                            val carAddress = SessionController.carPlayPeerAddress()
+                                ?: TargetDevicePrefs.get(context)?.address
+                            if (address.equals(carAddress, ignoreCase = true)) onCarDisconnected(context, address)
+                        }
+                    }
+                }
+            },
+            filter,
+            ContextCompat.RECEIVER_EXPORTED,
+        )
+    }
+
+    private fun onCarDisconnected(context: Context, address: String) {
         if (address.equals(departure?.address, ignoreCase = true)) return
+        DebugFileLog.append(context, "IDLE: 车机蓝牙链路断开，开始 30 秒计时")
         val now = SystemClock.elapsedRealtime()
         departure = Departure(address, now)
         schedule(context.applicationContext, now + CarIdlePolicy.IDLE_TIMEOUT_MILLIS)
-    }
-
-    fun onCarConnected(context: Context, address: String) {
-        val isTarget = address.equals(TargetDevicePrefs.get(context)?.address, ignoreCase = true)
-        val offlineCar = CarApproachPrefs.offlineCarAddress(context)
-        val returnedToCar = offlineCar != null && (isTarget || address.equals(offlineCar, ignoreCase = true))
-        if (returnedToCar) CarApproachPrefs.setOfflineCarAddress(context, null)
-        val pending = departure
-        if (address.equals(pending?.address, ignoreCase = true) ||
-            (pending == null && (returnedToCar || isTarget))
-        ) {
-            cancel(context)
-        }
     }
 
     fun onProjectionStopped(context: Context) {
@@ -101,10 +127,7 @@ object CarIdleGuard {
             cancel(context)
             return
         }
-        val target = TargetDevicePrefs.get(context)
         val verdict = CarIdlePolicy.onIdleTimeout(
-            aclConnected = target != null && TargetDevicePrefs.matches(target, pending.address) &&
-                CarApproachPrefs.aclConnected(context),
             disconnectedForMillis = SystemClock.elapsedRealtime() - pending.disconnectedAt,
             streaming = SessionController.isCarProjectionActive(),
             uiVisible = hasUnlockedUi(context),
@@ -113,7 +136,6 @@ object CarIdleGuard {
             CarIdlePolicy.Verdict.STOP_SESSION -> finishDeparture(context, pending.address, killProcess = false)
             CarIdlePolicy.Verdict.STOP_PROCESS -> finishDeparture(context, pending.address, killProcess = true)
             CarIdlePolicy.Verdict.STREAMING -> cancelScheduledChecks(context) // 视频结束会再次检查。
-            CarIdlePolicy.Verdict.STILL_CONNECTED -> cancel(context)
             CarIdlePolicy.Verdict.WAITING -> Unit
         }
     }
@@ -123,12 +145,11 @@ object CarIdleGuard {
             cancel(context)
             return
         }
-        CarApproachPrefs.setOfflineCarAddress(context, address)
+        CarIdlePrefs.setOfflineCarAddress(context, address)
         shutdown(
             context,
             reason = "车机蓝牙断开 30 秒未回连，投屏已结束",
             killProcess = killProcess,
-            suppressAutoStart = false,
             carDeparted = true,
         )
     }
@@ -145,32 +166,18 @@ object CarIdleGuard {
         context.getSystemService(PowerManager::class.java)?.isInteractive == false ||
             context.getSystemService(KeyguardManager::class.java)?.isKeyguardLocked == true
 
-    /**
-     * 结束会话、停服务、清通知，可选地把进程也退掉。
-     *
-     * @param killProcess true = 收尾后退出进程（静默检测不受影响，见类注释）
-     * @param suppressAutoStart true = 置「刚断开过」抑制，避免车机仍连着时链路抖动
-     *   立刻又把 App 拉起来（那会变成「断开 → 自动重连」的死循环）；车机真断开时
-     *   这个标记会由 [CarApproachReceiver] 自动清除，不影响下次靠近。
-     */
+    /** 结束会话、停服务、清通知，可在收尾后退出进程。 */
     fun shutdown(
         context: Context,
         reason: String,
         killProcess: Boolean,
-        suppressAutoStart: Boolean,
         carDeparted: Boolean = false,
     ) {
         cancel(context)
         DebugFileLog.append(
             context,
-            "IDLE: $reason——结束会话、停止保活服务" + if (killProcess) "，随后退出进程（静默检测保留）" else "",
+            "IDLE: $reason——结束会话、停止保活服务" + if (killProcess) "，随后退出进程" else "",
         )
-        // 只有在车机**还连着**蓝牙时才需要抑制：那种情况下链路抖一下就会重发
-        // ACL_CONNECTED，不压一下会变成「关掉 → 立刻又被拉起」。车机已经走了
-        // （aclConnected = false）就没什么可抑制的，下次靠近理应能直接触发。
-        if (suppressAutoStart && CarApproachPrefs.aclConnected(context)) {
-            CarApproachPrefs.setSuppressed(context, true)
-        }
         runCatching { SessionController.disconnect(context, carDeparted, graceful = !killProcess) }
             .onFailure {
                 DebugFileLog.append(context, "IDLE: 断开过程异常（${it.javaClass.simpleName}），继续收尾")
@@ -183,7 +190,6 @@ object CarIdleGuard {
         runCatching {
             val manager = context.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
             manager.cancel(CarPlayService.NOTIFICATION_ID)
-            manager.cancel(CarApproachReceiver.BLOCKED_NOTIFICATION_ID)
         }
         if (killProcess) scheduleExit(context, carDeparted)
     }
@@ -192,8 +198,6 @@ object CarIdleGuard {
         val generation = shutdownGeneration
         handler.postDelayed(
             {
-                // killProcess 而不是 exit：走的是同一套「进程被回收」路径，
-                // 系统下一次投递 ACL_CONNECTED 时照样能把静态接收器拉起来。
                 if (generation == shutdownGeneration &&
                     (!carDeparted || SessionController.isCarOffline &&
                         !SessionController.hasCarWorkToStop() && !hasUnlockedUi(context))

@@ -58,6 +58,30 @@ class AudioProfileMemoryTest {
     }
 
     @Test
+    fun carPlusReportsCurrentAndRememberedFallbacks() {
+        val pcm = AudioProfile("media", 1L shl 15, 48_000, 250)
+        val aac = AudioProfile("media", 1L shl 22, 44_100, 250, 102L, AudioCodec.AAC_LC)
+        val candidates = listOf(aac, pcm)
+        val entry = AudioProfileMemory.Entry(working = aac.key)
+        assertTrue(AudioProfileMemory.usedFallback(aac, pcm, candidates, entry, preferPcm48Media = true))
+        assertTrue(
+            AudioProfileMemory.usedFallback(
+                aac, aac, candidates, entry.copy(rejected = setOf(pcm.key)), preferPcm48Media = true,
+            ),
+        )
+    }
+
+    @Test
+    fun carPlusDoesNotReportAnUnsupportedPcmProfileAsAFallback() {
+        val aac = AudioProfile("media", 1L shl 22, 44_100, 250, 102L, AudioCodec.AAC_LC)
+        assertFalse(
+            AudioProfileMemory.usedFallback(
+                aac, aac, listOf(aac), AudioProfileMemory.Entry(), preferPcm48Media = true,
+            ),
+        )
+    }
+
+    @Test
     fun rejectedProfileGoesLastButStaysAsFallback() {
         val media44 = hondaCandidates[0].key
         val ordered =

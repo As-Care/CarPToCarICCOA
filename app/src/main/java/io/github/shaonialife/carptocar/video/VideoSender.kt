@@ -137,6 +137,17 @@ class VideoSender(
 
     @Volatile
     private var passthrough = false
+
+    internal enum class OutputMode {
+        H264_PASSTHROUGH,
+        SURFACE,
+        SURFACE_FALLBACK,
+    }
+
+    @Volatile
+    internal var outputMode: OutputMode? = null
+        private set
+
     private var strictKeyFrames = false
     private var droppedBeforeConfig = 0L
 
@@ -322,13 +333,14 @@ class VideoSender(
      * （隐形屏模式下由 DualDisplayComposer 的合成画布填充）。
      */
     @Synchronized
-    fun start(onSurfaceReady: (Surface) -> Unit): Boolean {
+    fun start(surfaceFallback: Boolean = false, onSurfaceReady: (Surface) -> Unit): Boolean {
         if (running.get()) return true
         if (!openDataPort()) {
             stop()
             return false
         }
-        return startEncoder(onSurfaceReady)
+        val mode = if (surfaceFallback) OutputMode.SURFACE_FALLBACK else OutputMode.SURFACE
+        return startEncoder(mode, onSurfaceReady)
     }
 
     /** Switches after the encoded-frame reader has stopped, keeping the CarPlay cipher and socket. */
@@ -337,15 +349,16 @@ class VideoSender(
         if (!running.get() || !passthrough) return false
         synchronized(writeLock) {
             passthrough = false
+            outputMode = null
             configSent = false
             cachedCsd = null
             sentSps = null
             lastIdrNals = null
         }
-        return startEncoder(onSurfaceReady)
+        return startEncoder(OutputMode.SURFACE_FALLBACK, onSurfaceReady)
     }
 
-    private fun startEncoder(onSurfaceReady: (Surface) -> Unit): Boolean {
+    private fun startEncoder(mode: OutputMode, onSurfaceReady: (Surface) -> Unit): Boolean {
         return try {
             val bitrate =
                 (
@@ -365,6 +378,7 @@ class VideoSender(
             ended.set(false)
             lastFrameAtMs = 0L
             if (startedAt == 0L) startedAt = android.os.SystemClock.elapsedRealtime()
+            outputMode = mode
             running.set(true)
             lastKeepAliveAt = android.os.SystemClock.uptimeMillis()
 
@@ -484,6 +498,7 @@ class VideoSender(
     fun stop() {
         running.set(false)
         passthrough = false
+        outputMode = null
         val surface = inputSurface
         inputSurface = null
         surface?.let { runCatching { onSurfaceStopped?.invoke(it) } }
@@ -522,6 +537,7 @@ class VideoSender(
         passthrough = true
         ended.set(false)
         if (startedAt == 0L) startedAt = android.os.SystemClock.elapsedRealtime()
+        outputMode = OutputMode.H264_PASSTHROUGH
         running.set(true)
         lastKeepAliveAt = android.os.SystemClock.uptimeMillis()
         // 新一轮会话：上一轮的「最后一帧」不能拿来重发（车机解码器已重建，

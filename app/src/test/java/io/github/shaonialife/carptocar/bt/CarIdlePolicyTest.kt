@@ -8,17 +8,25 @@ import org.junit.Test
 
 class CarIdlePolicyTest {
     private fun reconnectOnOpen(
-        action: String = Intent.ACTION_MAIN,
+        action: String? = Intent.ACTION_MAIN,
+        categories: Set<String>? = setOf(Intent.CATEGORY_LAUNCHER),
         flags: Int = Intent.FLAG_ACTIVITY_NEW_TASK,
         restoringActivity: Boolean = false,
         autoConnectEnabled: Boolean = true,
-    ) = CarIdlePolicy.shouldReconnectAfterLauncherOpen(
-        action, setOf(Intent.CATEGORY_LAUNCHER), flags, restoringActivity, autoConnectEnabled,
+    ) = CarIdlePolicy.shouldReconnectAfterAppLaunch(
+        action, categories, flags, restoringActivity, autoConnectEnabled,
     )
 
     @Test
     fun `离车后从桌面重新启动可发起连接`() {
         assertTrue(reconnectOnOpen())
+    }
+
+    @Test
+    fun `离车后外部直接打开主界面也可发起连接`() {
+        assertTrue(reconnectOnOpen(action = null, categories = null))
+        assertFalse(reconnectOnOpen(action = null, categories = null, autoConnectEnabled = false))
+        assertFalse(reconnectOnOpen(action = null, categories = null, flags = Intent.FLAG_ACTIVITY_LAUNCHED_FROM_HISTORY))
     }
 
     @Test
@@ -34,12 +42,10 @@ class CarIdlePolicyTest {
     }
 
     private fun verdict(
-        aclConnected: Boolean = false,
         disconnectedForMillis: Long = CarIdlePolicy.IDLE_TIMEOUT_MILLIS,
         streaming: Boolean = false,
         uiVisible: Boolean = false,
     ) = CarIdlePolicy.onIdleTimeout(
-        aclConnected = aclConnected,
         disconnectedForMillis = disconnectedForMillis,
         streaming = streaming,
         uiVisible = uiVisible,
@@ -48,14 +54,6 @@ class CarIdlePolicyTest {
     @Test
     fun `链路断开且无画面无界面时收摊`() {
         assertEquals(CarIdlePolicy.Verdict.STOP_PROCESS, verdict())
-    }
-
-    @Test
-    fun `30 秒内车机回连则保留会话`() {
-        assertEquals(
-            CarIdlePolicy.Verdict.STILL_CONNECTED,
-            verdict(aclConnected = true, disconnectedForMillis = 29_999L),
-        )
     }
 
     @Test
@@ -74,16 +72,6 @@ class CarIdlePolicyTest {
         assertEquals(
             CarIdlePolicy.Verdict.STOP_PROCESS,
             verdict(disconnectedForMillis = 30_000L),
-        )
-    }
-
-    @Test
-    fun `链路优先于推流与界面判定`() {
-        // 回连后画面多半也在重建：只要链路在，结论就不该是「已断开」，
-        // 否则会误判为可以收摊。
-        assertEquals(
-            CarIdlePolicy.Verdict.STILL_CONNECTED,
-            verdict(aclConnected = true, streaming = true, uiVisible = true),
         )
     }
 

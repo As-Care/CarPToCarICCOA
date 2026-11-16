@@ -24,9 +24,7 @@ import io.github.shaonialife.carptocar.bt.CarIdleGuard
  *
  * ## 通知栏是这个服务的第二个职责：唯一「看得见、关得掉」的界面（2026-10-30）
  *
- * 靠近车机自动启动把界面拉成**后台运行**时（系统限制后台弹界面 / 屏幕锁着），
- * 用户面前没有任何窗口，最近任务里也找不到——连接在跑，人却看不见，更没法停。
- * 所以常驻通知不能只是一行「运行中」：它必须能回答两个问题——
+ * 主界面退到后台或手机锁屏时，用户仍可通过通知查看连接阶段和断开会话。
  *
  * 1. **在做什么**（[SessionController.notificationSummary]，每 3 秒刷新一次阶段文案）；
  * 2. **怎么关**（通知上的「断开」按钮，走 [NotificationActionReceiver]，不依赖界面存活）。
@@ -141,14 +139,13 @@ class CarPlayService : Service() {
      * 通知栏那条还挂着」的观感：用户已经明确表示不要它了，系统却按服务的意愿继续保活。
      *
      * 这里把它当作用户的终态指令：走和「通知栏断开」「车机远离 30 秒」一样的收摊路径
-     * （结束会话 → 停服务 → 清通知 → 退进程），并置抑制避免车机还连着时立刻又被拉起。
+     * （结束会话 → 停服务 → 清通知 → 退进程）。
      */
     override fun onTaskRemoved(rootIntent: Intent?) {
         CarIdleGuard.shutdown(
             this,
             reason = "用户从最近任务划掉了 App",
             killProcess = true,
-            suppressAutoStart = true,
         )
         super.onTaskRemoved(rootIntent)
     }

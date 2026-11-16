@@ -186,6 +186,20 @@ object AudioProfileMemory {
         return (listOfNotNull(directPcm, working) + safe + risky).distinctBy { it.key }
     }
 
+    /** A later SETUP attempt or a prior rejection can both move this session off the preferred format. */
+    internal fun usedFallback(
+        chosen: AudioProfile,
+        firstAttempt: AudioProfile,
+        candidates: List<AudioProfile>,
+        entry: Entry,
+        preferPcm48Media: Boolean,
+    ): Boolean {
+        if (chosen.key != firstAttempt.key) return true
+        if (entry.rejected.isEmpty()) return false
+        val preferred = order(candidates, Entry(), preferPcm48Media).firstOrNull() ?: return false
+        return preferred.key != chosen.key && preferred.key in entry.rejected
+    }
+
     // ---- 内部 ----
 
     private val memory = HashMap<String, Entry>()

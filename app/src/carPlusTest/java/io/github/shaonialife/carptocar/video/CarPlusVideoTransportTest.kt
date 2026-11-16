@@ -25,6 +25,7 @@ import java.nio.ByteBuffer
 import java.nio.ByteOrder
 import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import org.junit.runner.RunWith
@@ -58,6 +59,7 @@ class CarPlusVideoTransportTest {
                 )
                 try {
                     assertTrue(sender.startPassthrough(strictKeyFrames = true))
+                    assertEquals(VideoSender.OutputMode.H264_PASSTHROUGH, sender.outputMode)
                     receiver.accept().use { socket ->
                         socket.soTimeout = 5_000
                         val (input, output) = ParcelFileDescriptor.createSocketPair()
@@ -90,6 +92,7 @@ class CarPlusVideoTransportTest {
                 } finally {
                     sender.stop()
                 }
+                assertNull(sender.outputMode)
             }
         } finally {
             extractor.release()
@@ -103,10 +106,10 @@ class CarPlusVideoTransportTest {
 
     @Test
     fun decodedSampleIsResizedToAudiCanvas() {
-        assertEncodedSize(1412, 654)
+        assertEncodedSize(1412, 654, fallBack = true)
     }
 
-    private fun assertEncodedSize(width: Int, height: Int) {
+    private fun assertEncodedSize(width: Int, height: Int, fallBack: Boolean = false) {
         val address = InetAddress.getByName("127.0.0.1")
         val key = ByteArray(32) { it.toByte() }
         ServerSocket(0, 1, address).use { receiver ->
@@ -124,7 +127,14 @@ class CarPlusVideoTransportTest {
             )
             try {
                 lateinit var encoderInput: Surface
-                assertTrue(sender.start { encoderInput = it })
+                if (fallBack) {
+                    assertTrue(sender.startPassthrough(strictKeyFrames = true))
+                    assertTrue(sender.fallBackToSurface { encoderInput = it })
+                    assertEquals(VideoSender.OutputMode.SURFACE_FALLBACK, sender.outputMode)
+                } else {
+                    assertTrue(sender.start { encoderInput = it })
+                    assertEquals(VideoSender.OutputMode.SURFACE, sender.outputMode)
+                }
                 receiver.accept().use { socket ->
                     socket.soTimeout = 5_000
                     val scaling = if (width == CarPlusVideo.WIDTH && height == CarPlusVideo.HEIGHT) {

@@ -5,8 +5,7 @@ import android.content.Intent
 /**
  * 「车机走远了，该不该收摊」的判定（2026-10-30）。
  *
- * 抽成纯函数与 [CarApproachPolicy] 同源：真正触发靠系统 ACL 广播 + 延时闹钟，
- * 时序不可控；能测的只有「到点这一刻到底关不关」。
+ * 30 秒内的回连由 [CarIdleGuard] 取消计时。这里只判定计时到期后是否结束会话。
  *
  * 30 秒是刻意选的值：车机熄火/人下车时蓝牙会断，但**断一下又回连**很常见
  * （车机重启、HFP 重建、走到车尾信号弱）。等 30 秒就是给这段抖动留窗口——
@@ -21,7 +20,7 @@ object CarIdlePolicy {
     /** 蓝牙断开后等这么久再收摊。 */
     const val IDLE_TIMEOUT_MILLIS = 30_000L
 
-    internal fun shouldReconnectAfterLauncherOpen(
+    internal fun shouldReconnectAfterAppLaunch(
         action: String?,
         categories: Set<String>?,
         flags: Int,
@@ -29,15 +28,12 @@ object CarIdlePolicy {
         autoConnectEnabled: Boolean,
     ): Boolean =
         autoConnectEnabled && !restoringActivity &&
-            action == Intent.ACTION_MAIN && categories?.contains(Intent.CATEGORY_LAUNCHER) == true &&
-            flags and Intent.FLAG_ACTIVITY_LAUNCHED_FROM_HISTORY == 0
+            flags and Intent.FLAG_ACTIVITY_LAUNCHED_FROM_HISTORY == 0 &&
+            (action == null || action == Intent.ACTION_MAIN && categories?.contains(Intent.CATEGORY_LAUNCHER) == true)
 
     enum class Verdict {
         STOP_SESSION,
         STOP_PROCESS,
-
-        /** 车机又连上了（30 秒内回连）——保留会话。 */
-        STILL_CONNECTED,
 
         /** 蓝牙断了但画面还在送（镜像走 WiFi）——不杀，用户正在用。 */
         STREAMING,
@@ -46,18 +42,15 @@ object CarIdlePolicy {
     }
 
     /**
-     * @param aclConnected 目标车机的 ACL 链路当前是否连着（由广播维护，跨进程存活）
      * @param streaming 画面是否真的在往车机送
      * @param uiVisible 界面此刻是否在前台（用户正看着手机时不该把进程掐掉）
      */
     fun onIdleTimeout(
-        aclConnected: Boolean,
         disconnectedForMillis: Long,
         streaming: Boolean,
         uiVisible: Boolean,
     ): Verdict =
         when {
-            aclConnected -> Verdict.STILL_CONNECTED
             disconnectedForMillis < IDLE_TIMEOUT_MILLIS -> Verdict.WAITING
             streaming -> Verdict.STREAMING
             uiVisible -> Verdict.STOP_SESSION

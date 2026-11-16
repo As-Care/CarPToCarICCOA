@@ -29,10 +29,6 @@
     <uses-permission android:name="android.permission.MODIFY_AUDIO_SETTINGS" />
     <!-- 暗幕（替代息屏）需要；系统「显示在其他应用上层」列表只收录声明本权限的应用 -->
     <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />
-    <!-- 靠近车机自动启动：靠系统投递蓝牙 ACL 广播唤醒进程。电池优化一开，
-         后台进程被冻结/广播被丢弃，功能会表现为「有时连、有时没反应」，
-         故需要引导用户把本应用加入「不限制」名单（App 内只在开启开关时提示一次）。
-         本 App 自用、不分发到 Play，不受其对该权限的政策限制。 -->
     <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
 
     <uses-feature android:name="android.hardware.bluetooth" android:required="false" />
@@ -103,29 +99,7 @@
             android:excludeFromRecents="true"
             android:theme="@style/Theme.CarPlaySender.Launcher" />
 
-        <!-- 靠近车机自动启动（2026-10-30）：只听系统蓝牙 ACL 事件——车机进入范围后
-             自己回连手机时系统会投递 ACTION_ACL_CONNECTED，据此识别「车来了」。
-             这是静默检测的全部实现：不扫描、不轮询、无常驻服务、无常驻通知。
-             静态注册的用意是 App 没打开、进程没起来也能收到（系统投递时拉起进程）。
-
-             exported 必须为 true：ACL_* 由系统蓝牙栈（独立进程）投递，exported="false"
-             只放行「同 uid」的广播，车机连上来时这条广播会被直接丢掉、表现为完全不触发。
-             该 action 在系统侧属 protected-broadcast，第三方应用无法伪造，故不担心被滥用。 -->
-        <receiver
-            android:name=".bt.CarApproachReceiver"
-            android:exported="true">
-            <intent-filter>
-                <action android:name="android.bluetooth.device.action.ACL_CONNECTED" />
-                <action android:name="android.bluetooth.device.action.ACL_DISCONNECTED" />
-            </intent-filter>
-        </receiver>
-
-        <!-- 车机远离后的收摊闹钟（2026-10-30）：蓝牙断开 30 秒未回连 → 结束会话、
-             停保活服务、退出进程。
-
-             必须 exported="false"：上面那个接收器为了收系统 ACL 广播不得不导出，
-             而「退出进程」这种动作若也放在那里，任何第三方应用发一条广播就能把本应用
-             掐掉。这里只由本应用自己的 PendingIntent 显式投递，不设 intent-filter。 -->
+        <!-- 离车超时由本应用的闹钟显式投递。 -->
         <receiver
             android:name=".service.CarIdleReceiver"
             android:exported="false" />

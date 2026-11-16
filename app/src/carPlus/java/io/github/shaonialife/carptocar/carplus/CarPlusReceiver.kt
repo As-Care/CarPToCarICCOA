@@ -187,10 +187,10 @@ internal object CarPlusReceiver {
         val recentMismatch = incompatibleRoute?.takeIf { it.route == route && SystemClock.elapsedRealtime() < it.until }
         if (BuildConfig.CAR_PLUS_VIDEO_RELAY && recentMismatch != null) {
             SessionController.appendLog("ICCOA: 近期源档位不兼容（${recentMismatch.format}）· 直接使用 Surface")
-            return sender.start { attachDecoded(it, sender, size, recentMismatch.format.size) }
+            return sender.start(surfaceFallback = true) { attachDecoded(it, sender, size, recentMismatch.format.size) }
         }
         if (!BuildConfig.CAR_PLUS_VIDEO_RELAY || !sender.startPassthrough(strictKeyFrames = true)) {
-            return sender.start { attachScaled(it, sender, size) }
+            return sender.start(surfaceFallback = BuildConfig.CAR_PLUS_VIDEO_RELAY) { attachScaled(it, sender, size) }
         }
         onMain {
             if (sender.isRunning) {
