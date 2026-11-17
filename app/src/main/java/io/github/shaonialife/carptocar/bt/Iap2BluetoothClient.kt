@@ -7,6 +7,7 @@ import android.bluetooth.BluetoothManager
 import android.bluetooth.BluetoothSocket
 import android.content.Context
 import android.content.pm.PackageManager
+import android.os.SystemClock
 import androidx.core.content.ContextCompat
 import io.github.shaonialife.carptocar.iap2.CarPlayNowPlaying
 import io.github.shaonialife.carptocar.iap2.Iap2SenderSession
@@ -83,6 +84,9 @@ class Iap2BluetoothClient(
         private const val BACKOFF_POLL_MILLIS = 250L
 
         private const val FAILURE_LOG_THROTTLE_MILLIS = 15_000L
+
+        /** 从首次直连开始给车机留出回连窗口。AUDI 4930 曾在约 4 秒时主动连入。 */
+        private const val CAR_RECONNECT_WINDOW_MILLIS = 6_000L
 
         /** 目标连不上多少轮后放开限制（16s/轮 → 约 32s 后回退，避免一个死目标堵死整轮）。 */
         private const val TARGET_FALLBACK_ROUNDS = 2
@@ -346,7 +350,7 @@ class Iap2BluetoothClient(
         var passiveFailRounds = 0
         /** 连续「没有有效会话」的轮数，用于 [RETRY_BACKOFF_MILLIS] 退避（连上即断也算）。 */
         var failStreak = 0
-        while (running && generation.get() == myGeneration) {
+        connectLoop@ while (running && generation.get() == myGeneration) {
             // 用户刚手动断开 → 先等车机「忘掉」上一轮，别急着拨。
             //
             // 2026-11-04 奥迪 4910（MIB3 4580）实录：16:22:32.519 手动断开，
@@ -426,7 +430,7 @@ class Iap2BluetoothClient(
                 // 自动模式（未选目标）先过 SDP 闸门：候选=全部已配对设备，耳机/手表
                 // 没有 iAP2 服务，连不上还白白被断 HFP/A2DP（设备级断开兜底更会波及
                 // 其它在线设备）——确认提供 …caff 才进入「断开+连接」流程。选定目标
-                // 的设备不过闸（用户显式指定，保持原路径与时序）。
+                // 的设备不过这个闸（用户显式指定）。
                 val gate =
                     if (targetProvider() == null || BtSessionGate.targetSoftFallback) {
                         // 软回退（目标连不上、放开限制）也过闸：否则会把已配对的耳机、
@@ -442,60 +446,46 @@ class Iap2BluetoothClient(
                     }
                     continue
                 }
-                if (gate == Iap2Service.UNKNOWN) {
-                    // SDP 没问出结论：先**不动音频**，直接探一次 …caff。
-                    // 探通=它就是车机（自动模式不再误杀，这是 2026-10-26 凯迪拉克日志的病根）；
-                    // 探不通再看是不是「蓝牙已连接时不开放服务窗口」的机型（奥迪实测），
-                    // 此时才断开配置文件重试一次——耳机类设备永远不会被我们断掉音频。
-                    var probe = tryConnect(device, myGeneration)
-                    if (generation.get() != myGeneration) return
-                    if (probe == null && !looksLikePersonalAudio(device)) {
-                        val dropped = BtProfiles.disconnect(context, device)
-                        if (dropped.isNotEmpty()) {
-                            log("BT-C: $name SDP 未给结论、直连失败——已断开 ${dropped.joinToString("/")} 再试一次")
-                        }
-                        probe = tryConnect(device, myGeneration)
-                    }
-                    if (probe == null) {
-                        iap2ServiceCache[device.address] = false
-                        if (lastFailureWasSdpLookup && !looksLikePersonalAudio(device)) {
-                            sdpLookupFailures++
-                        }
-                        if (skippedNoService.add(device.address)) {
-                            log("BT-C: 跳过「$name」（SDP 未给出结论、直连 …caff 也失败——按非 CarPlay 设备处理）")
-                        }
-                        continue
-                    }
-                    log("BT-C: 「$name」SDP 未给出结论，但直连 …caff 成功——按车机处理")
-                    connected = probe
-                    break
+                // SDP 未知时只探一次个人音频设备，保留其通话和媒体连接。
+                val allowProfileFallback = gate == Iap2Service.HAS || !looksLikePersonalAudio(device)
+                val canAttempt = {
+                    running && generation.get() == myGeneration &&
+                        !BtSessionGate.inboundActive &&
+                        (!BtSessionGate.sessionActive ||
+                            recoveryPeers != null && recoveryPeers == BtSessionGate.linkRecoveryTarget())
                 }
-                // 先「保持现有配置文件」直连一次。
-                // 2026-10-26 雪铁龙 R4 日志：手机 HFP/A2DP 在线时先被我们主动断开，
-                // 紧接着 …caff 连接在 **180ms** 内就失败——这么快不是超时，是 SDP 里
-                // 压根查不到该服务。顺序反过来（先试、失败再断）对两种机型都成立：
-                // 需要「保持连接」的车机第一次就能成，奥迪那类需要「仅配对」的车机
-                // 会在第一次失败后走到下面的断开重试。
-                var socket = tryConnect(device, myGeneration)
-                if (generation.get() != myGeneration) return
-                if (socket == null) {
-                    // 「只配对、不连接」：奥迪 MIB3 实测手机与车机处于蓝牙已连接状态
-                    // （HFP/A2DP 在线）时，车机不开放无线 CarPlay 的 iAP2 服务窗口——
-                    // 表现为每 3s 连接失败。iAP2 是独立的 SDP 直连服务，与这些配置文件
-                    // 无关，断开后不影响 CarPlay 本身（声音走 WiFi 的 AirPlay）。
-                    val dropped = BtProfiles.disconnect(context, device)
-                    if (dropped.isNotEmpty()) {
-                        val now = android.os.SystemClock.uptimeMillis()
-                        if (now - lastProfileLogAt > PROFILE_LOG_THROTTLE_MILLIS) {
-                            lastProfileLogAt = now
-                            val left = BtProfiles.stillConnected(context, device.address)
-                            log(
-                                "BT-C: $name 处于蓝牙已连接状态（${dropped.joinToString("/")}）——已断开重试" +
-                                    if (left.isEmpty()) "" else "（仍有 ${left.joinToString("/")} 在线）",
-                            )
+                val reconnectDeadline = SystemClock.uptimeMillis() + CAR_RECONNECT_WINDOW_MILLIS
+                val socket = connectWithProfileFallback(
+                    allowProfileFallback = allowProfileFallback,
+                    canAttempt = canAttempt,
+                    connect = { tryConnect(device, myGeneration) },
+                    waitForCar = {
+                        val reason = lastConnectError ?: "原因未知"
+                        log("BT-C: 首次直连「$name」失败（$reason）——保留蓝牙，等待车机回连后再试")
+                        while (canAttempt()) {
+                            val remaining = reconnectDeadline - SystemClock.uptimeMillis()
+                            if (remaining <= 0) break
+                            sleepQuietly(minOf(remaining, BACKOFF_POLL_MILLIS))
                         }
+                        if (canAttempt()) log("BT-C: 仍未收到「$name」回连——保留蓝牙再试一次")
+                    },
+                    disconnectProfiles = { disconnectProfilesForRetry(device, name, canAttempt) },
+                )
+                if (!canAttempt()) {
+                    // 取消或车机抢先连入时，让出出站通道，不把这一轮算作失败。
+                    socket?.let {
+                        currentSocket.compareAndSet(it, null)
+                        runCatching { it.close() }
                     }
-                    socket = tryConnect(device, myGeneration)
+                    continue@connectLoop
+                }
+                if (gate == Iap2Service.UNKNOWN && socket == null) {
+                    iap2ServiceCache[device.address] = false
+                    if (lastFailureWasSdpLookup && allowProfileFallback) sdpLookupFailures++
+                    if (skippedNoService.add(device.address)) {
+                        log("BT-C: 跳过「$name」（SDP 未给出结论、直连 …caff 也失败——按非 CarPlay 设备处理）")
+                    }
+                    continue
                 }
                 if (socket != null) {
                     log("BT-C: ✓ 已连入 $name 的无线 iAP2 服务（RFCOMM 建立）")
@@ -587,6 +577,27 @@ class Iap2BluetoothClient(
             }
         }
         log("BT-C: 客户端已停止")
+    }
+
+    @SuppressLint("MissingPermission")
+    private fun disconnectProfilesForRetry(
+        device: BluetoothDevice,
+        name: String,
+        canAttempt: () -> Boolean,
+    ): Boolean {
+        // 部分车机需要先释放通话和媒体蓝牙才会开放 iAP2，保留这条兼容路径。
+        val dropped = BtProfiles.disconnect(context, device, canAttempt)
+        if (dropped.isEmpty()) return false
+        val now = SystemClock.uptimeMillis()
+        if (canAttempt() && now - lastProfileLogAt > PROFILE_LOG_THROTTLE_MILLIS) {
+            lastProfileLogAt = now
+            val left = BtProfiles.stillConnected(context, device.address)
+            log(
+                "BT-C: 「$name」两次直连失败——已请求断开 ${dropped.joinToString("/")} 再试" +
+                    if (left.isEmpty()) "" else "（仍有 ${left.joinToString("/")} 在线）",
+            )
+        }
+        return true
     }
 
     /**
@@ -820,6 +831,24 @@ class Iap2BluetoothClient(
             sleepQuietly(BACKOFF_POLL_MILLIS)
         }
     }
+}
+
+/** 只有保留蓝牙的两次直连都失败，才允许断开通话和媒体蓝牙后再拨。 */
+internal fun <Connection> connectWithProfileFallback(
+    allowProfileFallback: Boolean,
+    canAttempt: () -> Boolean,
+    connect: () -> Connection?,
+    waitForCar: () -> Unit,
+    disconnectProfiles: () -> Boolean,
+): Connection? {
+    if (!canAttempt()) return null
+    connect()?.let { return it }
+    if (!allowProfileFallback || !canAttempt()) return null
+    waitForCar()
+    if (!canAttempt()) return null
+    connect()?.let { return it }
+    if (!canAttempt() || !disconnectProfiles() || !canAttempt()) return null
+    return connect()
 }
 
 /**

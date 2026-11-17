@@ -71,11 +71,13 @@ object BtProfiles {
     /**
      * 尽力断开该设备的全部配置文件连接。
      *
+     * [canDisconnect] 在请求断开前重查，避免等待 profile 代理时车机已经主动连入。
      * @return 断开前在线的配置文件（空 = 本来就没连接，无需任何动作）
      */
     fun disconnect(
         context: Context,
         device: BluetoothDevice,
+        canDisconnect: () -> Boolean = { true },
     ): List<String> {
         val address =
             try {
@@ -84,12 +86,14 @@ object BtProfiles {
                 return emptyList()
             }
         val before = connectedNames(context, address)
-        if (before.isEmpty()) return emptyList()
+        if (before.isEmpty() || !canDisconnect()) return emptyList()
         for (id in profiles) {
             if (profileName(id) !in before) continue
-            proxy(context, id)?.let { disconnectProfile(it, device) }
+            val profile = proxy(context, id) ?: continue
+            if (!canDisconnect()) return emptyList()
+            disconnectProfile(profile, device)
         }
-        if (!awaitDisconnected(context, address, 1_500L)) {
+        if (canDisconnect() && !awaitDisconnected(context, address, 1_500L) && canDisconnect()) {
             // 配置级断开未生效（个别 ROM 限流）：设备级断开兜底（@hide，同样只要求
             // BLUETOOTH_CONNECT）。车载/耳机当前连接的设备可能被一并断开，属预期。
             runCatching { BluetoothDevice::class.java.getMethod("disconnect").invoke(device) }
