@@ -16,19 +16,35 @@ import org.junit.runner.RunWith
 @RunWith(AndroidJUnit4::class)
 class CarPlusWfdCanvasTest {
     @Test
-    fun sdkAdvertisesAudiCanvasToWfdSource() = checkAdvertisedVideo(CarPlusVideo.Size(1412, 654), CarPlusVideo.FPS)
+    fun sdkAdvertisesAudiCanvasToWfdSource() {
+        advertisedAvc(CarPlusVideo.audiCanvas, CarPlusVideo.FPS)
+    }
 
     @Test
     fun sdkAdvertisesManualCanvasToWfdSource() {
         val size = checkNotNull(CarPlusVideo.manualSize(1380, 880))
-        checkAdvertisedVideo(size, CarPlusVideo.FPS)
+        advertisedAvc(size, CarPlusVideo.FPS)
     }
 
     @Test
-    fun sdkAdvertisesSelectedHighFrameRateToWfdSource() =
-        checkAdvertisedVideo(CarPlusVideo.Size(1280, 720), CarPlusVideo.HIGH_FPS)
+    fun sdkAdvertisesSelectedHighFrameRateToWfdSource() {
+        advertisedAvc(CarPlusVideo.defaultSize, CarPlusVideo.HIGH_FPS)
+    }
 
-    private fun checkAdvertisedVideo(size: CarPlusVideo.Size, fps: Int) {
+    @Test
+    fun audiBaselineChangesOnlyAudiWfdAvcCapabilities() {
+        assumeTrue(BuildConfig.CAR_PLUS_WFD_PROFILE_CONTROL)
+        val audi = CarPlusVideo.audiCanvas
+        val fps = CarPlusVideo.FPS
+        val original = advertisedAvc(audi, fps)
+        assertEquals(0x01 to 0x01, original)
+        assertEquals(0x01 to 0x04, advertisedAvc(audi, fps, audiBaseline = true))
+        assertEquals(original, advertisedAvc(audi, fps))
+        val other = CarPlusVideo.defaultSize
+        assertEquals(advertisedAvc(other, fps), advertisedAvc(other, fps, audiBaseline = true))
+    }
+
+    private fun advertisedAvc(size: CarPlusVideo.Size, fps: Int, audiBaseline: Boolean = false): Pair<Int, Int> {
         assumeTrue(BuildConfig.CAR_PLUS_VIDEO_RELAY)
         ServerSocket(0, 1, InetAddress.getByName("127.0.0.1")).use { source ->
             source.soTimeout = 5_000
@@ -41,7 +57,7 @@ class CarPlusWfdCanvasTest {
                 deviceType,
                 Class.forName("com.ucar.vehiclesdk.cast.CastListener"),
             ).newInstance(null, device, null)
-            CarPlusVideoTap.request = CarPlusVideo.Request(size, fps)
+            CarPlusVideoTap.request = CarPlusVideo.Request(size, fps, audiBaseline)
             try {
                 CarPlusVideoTap.startWfdServer(cast, 1280, 720, 320, 30, false, false, false)
                 source.accept().use { peer ->
@@ -67,19 +83,21 @@ class CarPlusWfdCanvasTest {
                     )
                     val (headers, body) = readRtsp(input)
                     assertTrue(headers.first(), headers.first().startsWith("RTSP/1.0 200"))
-                    assertTrue(body, body.contains("display=${size.width}:${size.height}"))
-                    assertTrue(body, body.contains(";fps=$fps"))
+                    assertTrue(body, body.contains("display=${size.width}:${size.height};dpi=320;fps=$fps"))
+                    val videoFormats = body.lineSequence().first { it.startsWith("wfd_video_formats:") }
+                    val capability = videoFormats.substringAfter(':').trim().split(' ')
+                    return capability[2].toInt(16) to capability[3].toInt(16)
                 }
             } finally {
                 CarPlusVideoTap.request = CarPlusVideo.Request()
-                CarPlusVideoTap.resetAdvertisedFps()
+                CarPlusVideoTap.resetAdvertisedRequest()
             }
         }
     }
 
     @Test
     fun displayUsesNativeAspectAndFitsAnUnmatchedSource() {
-        val audi = CarPlusVideo.Size(1412, 654)
+        val audi = CarPlusVideo.audiCanvas
         assertEquals(CarPlusVideo.Viewport(0, 0, 1412, 654), CarPlusVideo.fit(audi, audi))
         assertEquals(CarPlusVideo.Viewport(125, 0, 1162, 654), CarPlusVideo.fit(CarPlusVideo.defaultSize, audi))
     }

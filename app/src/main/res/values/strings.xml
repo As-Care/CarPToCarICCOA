@@ -27,4 +27,6 @@
     <string name="carplus_frame_rate_next_connection">%1$s · 下次连接生效</string>
     <string name="carplus_frame_rate_saved">%1$s 已保存 · 下次连接生效</string>
     <string name="carplus_frame_rate_current">当前目标 %1$d fps · 实际发送 %2$s fps</string>
+    <string name="carplus_audi_baseline">奥迪 H.264 直通试验</string>
+    <string name="carplus_audi_baseline_note">1412×654 时请求 Baseline Level 4.0 · 重新连接车机后生效</string>
 </resources>

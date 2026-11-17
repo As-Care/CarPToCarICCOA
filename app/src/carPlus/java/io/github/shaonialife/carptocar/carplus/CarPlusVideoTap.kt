@@ -6,6 +6,7 @@ import android.system.OsConstants
 import android.util.Log
 import android.view.Surface
 import androidx.annotation.Keep
+import io.github.shaonialife.carptocar.BuildConfig
 import java.io.DataOutputStream
 import java.io.IOException
 import java.nio.ByteBuffer
@@ -16,9 +17,10 @@ import java.util.concurrent.atomic.AtomicReference
 @Keep
 internal object CarPlusVideoTap {
     const val MAX_FRAME_BYTES = 2 * 1024 * 1024
+    private const val BASELINE_DPI_MARKER = 0x4000_0000
     @Volatile private var target: Target? = null
     @Volatile var request = CarPlusVideo.Request()
-    @Volatile var advertisedFps: Int? = null
+    @Volatile var advertisedRequest: CarPlusVideo.Request? = null
         private set
     @Volatile var onSourceSize: ((CarPlusVideo.Size) -> Unit)? = null
     private val nextFrame = AtomicReference<(() -> Unit)?>(null)
@@ -62,14 +64,18 @@ internal object CarPlusVideoTap {
     ) {
         val requested = request
         val canvas = requested.canvas ?: CarPlusVideo.Size(width, height)
-        val sourceFps = requested.fps
-        advertisedFps = sourceFps
-        Log.i("CarPlusVideo", "ICCOA 向 Car+ 申请原生画布 ${canvas.width}×${canvas.height}@$sourceFps")
-        originalWfdStart.invoke(manager, canvas.width, canvas.height, dpi, sourceFps, hevc, fusion, rawPackets)
+        val baseline = requested.audiBaseline && canvas == CarPlusVideo.audiCanvas &&
+            BuildConfig.CAR_PLUS_WFD_PROFILE_CONTROL && dpi in 0..0xffff
+        // The bundled sink consumes the high word before serializing the real DPI.
+        val sdkDpi = if (baseline) dpi or BASELINE_DPI_MARKER else dpi
+        advertisedRequest = CarPlusVideo.Request(canvas, requested.fps, baseline)
+        val profile = if (baseline) " · H.264 Constrained Baseline Level 4.0" else ""
+        Log.i("CarPlusVideo", "ICCOA 向 Car+ 申请原生画布 ${canvas.width}×${canvas.height}@${requested.fps}$profile")
+        originalWfdStart.invoke(manager, canvas.width, canvas.height, sdkDpi, requested.fps, hevc, fusion, rawPackets)
     }
 
-    fun resetAdvertisedFps() {
-        advertisedFps = null
+    fun resetAdvertisedRequest() {
+        advertisedRequest = null
     }
 
     fun onNextFrame(callback: (() -> Unit)?) {

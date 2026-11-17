@@ -7,7 +7,7 @@ internal object CarPlusVideo {
     const val HIGH_FPS = 60
 
     data class Size(val width: Int, val height: Int)
-    data class Request(val canvas: Size? = null, val fps: Int = FPS)
+    data class Request(val canvas: Size? = null, val fps: Int = FPS, val audiBaseline: Boolean = false)
 
     fun supportsHighFps(carMaxFps: Int): Boolean = carMaxFps >= HIGH_FPS
 
@@ -52,6 +52,7 @@ internal object CarPlusVideo {
     }
 
     val defaultSize = Size(WIDTH, HEIGHT)
+    val audiCanvas = Size(1412, 654)
 
     fun displaySize(width: Int, height: Int): Size? =
         if (width in 320..4096 && height in 180..2304) Size(width, height) else null

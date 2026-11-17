@@ -1442,6 +1442,15 @@ class MainActivity : AppCompatActivity() {
     private fun bindDisplayCard() {
         bindCarPlusStreamSize()
         if (BuildConfig.CAR_PLUS_RUNTIME) bindCarPlusFrameRate()
+        if (BuildConfig.CAR_PLUS_WFD_PROFILE_CONTROL) {
+            findViewById<View>(R.id.carPlusAudiBaselinePanel).visibility = View.VISIBLE
+            findViewById<androidx.appcompat.widget.SwitchCompat>(R.id.switchCarPlusAudiBaseline).apply {
+                isChecked = DisplayPrefs.carPlusAudiBaseline(this@MainActivity)
+                setOnCheckedChangeListener { _, enabled ->
+                    DisplayPrefs.setCarPlusAudiBaseline(this@MainActivity, enabled)
+                }
+            }
+        }
     }
 
     private fun carPlusFrameRatePeer(): TargetDevicePrefs.Target? =

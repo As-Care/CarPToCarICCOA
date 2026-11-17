@@ -75,7 +75,7 @@ internal object CarPlusSdk {
                         if (connected) {
                             connected = false
                             requestedCastFps = null
-                            CarPlusVideoTap.resetAdvertisedFps()
+                            CarPlusVideoTap.resetAdvertisedRequest()
                             pauseCast()
                             advertise()
                             if (reconnectAfterDisconnect) {
@@ -266,7 +266,7 @@ internal object CarPlusSdk {
         runCatching { adapter?.disconnect() }
         runCatching { adapter?.stopAdvertise() }
         discovery?.stopWatching(stopNative)
-        CarPlusVideoTap.resetAdvertisedFps()
+        CarPlusVideoTap.resetAdvertisedRequest()
         requestedCastFps = null
         connected = false
         advertising = false
@@ -330,11 +330,16 @@ internal object CarPlusSdk {
         if (!wanted || !initialized || !connected) return
         val target = surface?.takeIf { it.isValid }
         if (target == null && !encodedOutput) return
-        val advertisedFps = CarPlusVideoTap.advertisedFps
-        val requestedFps = CarPlusVideoTap.request.fps
-        if (advertisedFps != null && advertisedFps != requestedFps) {
+        val advertised = CarPlusVideoTap.advertisedRequest
+        val requested = CarPlusVideoTap.request
+        if (advertised != null && (advertised.fps != requested.fps || advertised.audiBaseline != requested.audiBaseline)) {
             if (reconnectDeadline == null) {
-                report?.invoke(null, "ICCOA 视频帧率请求从 $advertisedFps 改为 $requestedFps fps，重新协商")
+                val reason = if (advertised.fps != requested.fps) {
+                    "ICCOA 视频帧率请求从 ${advertised.fps} 改为 ${requested.fps} fps"
+                } else {
+                    "ICCOA 奥迪直通试验已${if (requested.audiBaseline) "开启" else "关闭"}"
+                }
+                report?.invoke(null, "$reason，重新协商")
                 reconnectIfPaired(restartCurrent = true)
             }
             return
@@ -342,7 +347,7 @@ internal object CarPlusSdk {
         if (!casting) {
             castStartedAt = SystemClock.elapsedRealtime()
             sourceFrameSeen = false
-            watchFirstCastFrame(requestedFps)
+            watchFirstCastFrame(requested.fps)
             casting = runCatching {
                 adapter?.startCast(target, CarPlusVideo.WIDTH, CarPlusVideo.HEIGHT) == true
             }.getOrDefault(false)

@@ -4278,7 +4278,11 @@ object SessionController {
                                         CarPlusVideo.displaySize(setup.displayWidth, setup.displayHeight)
                                     } else null
                                     val canvas = manualCarPlusSize ?: reported ?: CarPlusVideo.defaultSize
-                                    CarPlusReceiver.setVideoConfig(canvas.width, canvas.height, sessionTargetFps)
+                                    CarPlusReceiver.setVideoConfig(
+                                        canvas,
+                                        sessionTargetFps,
+                                        audiBaseline = DisplayPrefs.carPlusAudiBaseline(context),
+                                    )
                                     if (manualCarPlusSize != null) {
                                         appendLog("ICCOA: 使用手动流分辨率 ${canvas.width}×${canvas.height}")
                                     }

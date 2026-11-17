@@ -170,9 +170,11 @@ internal object CarPlusReceiver {
         }
     }
 
-    fun setVideoConfig(width: Int, height: Int, fps: Int) {
-        val canvas = CarPlusVideo.displaySize(width, height) ?: return
-        val request = CarPlusVideo.Request(canvas, fps)
+    fun setVideoConfig(canvas: CarPlusVideo.Size, fps: Int, audiBaseline: Boolean) {
+        val request = CarPlusVideo.Request(
+            canvas, fps,
+            audiBaseline = audiBaseline && BuildConfig.CAR_PLUS_WFD_PROFILE_CONTROL && canvas == CarPlusVideo.audiCanvas,
+        )
         videoRequest = request
         onMain {
             if (videoRequest === request) {
@@ -392,6 +394,7 @@ internal object CarPlusReceiver {
             putInt(CarPlusReceiverService.VIDEO_HEIGHT, it.height)
         }
         putInt(CarPlusReceiverService.VIDEO_FPS, request.fps)
+        putBoolean(CarPlusReceiverService.VIDEO_AUDI_BASELINE, request.audiBaseline)
     }
 
     private fun sendSurface(surface: Surface?) {

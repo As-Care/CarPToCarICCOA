@@ -64,6 +64,8 @@ python3 scripts/carplus-relay/prepare.py "$ANDROID_HOME" "$JAVA_HOME/bin/javac" 
 
 在上面的运行时构建命令中加入 `-PcarPlusRelayAssets=/path/to/relay-assets`。安装后由应用通过已有的 Root 授权启动本机转发，两个进程在电话上完成认证和视频交换。真机验收使用已保存的 ICCOA 配对记录，在 Android 测试中用 `-e colorosHardware true` 执行 `CarPlusStandaloneReconnectTest`，检查至少 75 秒的真实 H.264 帧能通过加密的 CarPlay 数据口。
 
+使用上述 MiAuto 0.1.1 DEX 运行时打包后，「投屏显示」中会出现「奥迪 H.264 直通试验」。开关默认关闭，断开并重新连接车机后生效。开启时为 1412×654 画布申报 H.264 Constrained Baseline Level 4.0，原 SDK 申报 Level 3.1。用 `CarPlusWfdCanvasTest` 检查两种开关状态的 WFD 声明。真车连上后，以实际 SPS 的档位、尺寸和 App 的视频通道状态确认是否进入直通。
+
 另可传入与 `UCarAdapter` 接口匹配的 ICCOA 车端 SDK AAR 直接构建。如果 AAR 已包含 `assets/ccd.data`，可省略资产目录参数。
 
 ```sh

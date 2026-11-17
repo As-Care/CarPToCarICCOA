@@ -108,6 +108,7 @@ internal class CarPlusReceiverService : Service() {
         CarPlusVideo.Request(
             CarPlusVideo.displaySize(message.data.getInt(VIDEO_WIDTH), message.data.getInt(VIDEO_HEIGHT)),
             message.data.getInt(VIDEO_FPS, CarPlusVideo.FPS),
+            message.data.getBoolean(VIDEO_AUDI_BASELINE),
         )
 
     override fun onDestroy() {
@@ -135,6 +136,7 @@ internal class CarPlusReceiverService : Service() {
         const val VIDEO_WIDTH = "videoWidth"
         const val VIDEO_HEIGHT = "videoHeight"
         const val VIDEO_FPS = "videoFps"
+        const val VIDEO_AUDI_BASELINE = "videoAudiBaseline"
         const val VIDEO_PIPE = "videoPipe"
         const val SURFACE_VALUE = "surface"
         const val STATUS_TEXT = "status"

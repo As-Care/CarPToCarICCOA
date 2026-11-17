@@ -4,16 +4,26 @@ import android.content.Context
 import io.github.shaonialife.carptocar.carplus.CarPlusVideo
 import java.util.Locale
 
-/** ICCOA 分辨率、帧率和车机能力按蓝牙地址保存。 */
+/** 投屏显示设置与车机能力。 */
 object DisplayPrefs {
     private const val PREFS_NAME = "settings"
     private const val KEY_ICCOA_WIDTH = "iccoa_stream_width"
     private const val KEY_ICCOA_HEIGHT = "iccoa_stream_height"
     private const val KEY_ICCOA_HIGH_FPS = "iccoa_high_fps"
     private const val KEY_ICCOA_CAR_MAX_FPS = "iccoa_car_max_fps"
+    private const val KEY_ICCOA_AUDI_BASELINE = "iccoa_audi_baseline"
     private const val KEY_LAST_CAR_WIDTH = "last_car_width"
     private const val KEY_LAST_CAR_HEIGHT = "last_car_height"
     private const val KEY_LAST_CAR_FROM_CAR = "last_car_from_car"
+
+    internal fun carPlusAudiBaseline(context: Context): Boolean =
+        context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE).getBoolean(KEY_ICCOA_AUDI_BASELINE, false)
+
+    internal fun setCarPlusAudiBaseline(context: Context, enabled: Boolean) {
+        context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE).edit()
+            .putBoolean(KEY_ICCOA_AUDI_BASELINE, enabled)
+            .apply()
+    }
 
     internal fun lastReportedCanvas(context: Context): CarPlusVideo.Size? {
         val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)

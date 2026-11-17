@@ -1,3 +1,4 @@
+import java.security.MessageDigest
 import java.util.Properties
 
 plugins {
@@ -13,7 +14,7 @@ plugins {
  * 0.x 为实验阶段；**1.0.0 起为正式版**（1.0.0 → versionCode 10000，仍大于 0.2.19 的 219）。
  * 发布前只需改这一行。
  */
-val appVersionName = "2.0.3"
+val appVersionName = "2.0.5"
 val appVersionCode =
     appVersionName
         .split(".")
@@ -41,6 +42,13 @@ val carPlusRelayAssets = providers.gradleProperty("carPlusRelayAssets").orNull?.
 val carPlusAudioRelay = carPlusSdkDex != null && carPlusRelayAssets != null
 val carPlusVideoRelay = carPlusSdkDex != null
 val carPlusRuntime = carPlusSdk != null || carPlusSdkDex != null
+// Match the native layout verified by package-carplus-runtime.py.
+val carPlusWfdProfileControl = carPlusVideoRelay &&
+    carPlusSdkJni?.resolve("arm64-v8a/libovmsink.so")?.takeIf { it.isFile }?.let { sink ->
+        val bytes = providers.fileContents(layout.file(providers.provider { sink })).asBytes.get()
+        MessageDigest.getInstance("SHA-256").digest(bytes).joinToString("") { "%02x".format(it) } ==
+            "298b9bff630751fbb6a934e2e6f549bcea83d619ed6d6b2eadd63ba68b231f34"
+    } == true
 val carPlusDebuggable = providers.gradleProperty("carPlusDebuggable").map(String::toBoolean).getOrElse(!carPlusRuntime)
 val carPlusApkName = "CarPToCar+ICCOA.apk"
 require(carPlusSdk == null || carPlusSdkDex == null) {
@@ -81,6 +89,7 @@ android {
         buildConfigField("boolean", "CAR_PLUS_RUNTIME", carPlusRuntime.toString())
         buildConfigField("boolean", "CAR_PLUS_AUDIO_RELAY", carPlusAudioRelay.toString())
         buildConfigField("boolean", "CAR_PLUS_VIDEO_RELAY", carPlusVideoRelay.toString())
+        buildConfigField("boolean", "CAR_PLUS_WFD_PROFILE_CONTROL", carPlusWfdProfileControl.toString())
         manifestPlaceholders["carPlusRuntime"] = carPlusRuntime.toString()
         ndk {
             abiFilters += listOf("arm64-v8a")
@@ -189,6 +198,7 @@ if (carPlusRuntime && carPlusSdkDex == null) {
         dependsOn("assembleDebug")
         inputs.files(baseApk, carPlusSdkDex, debugKeyStore, packagingScript)
         inputs.property("carPlusAudioRelay", carPlusAudioRelay)
+        inputs.property("carPlusWfdProfileControl", carPlusWfdProfileControl)
         if (carPlusAudioRelay) inputs.file(rootProject.file("scripts/PatchCarPlusAudio.java"))
         inputs.file(rootProject.file("scripts/PatchCarPlusVideo.java"))
         outputs.file(packagedApk)
@@ -203,6 +213,7 @@ if (carPlusRuntime && carPlusSdkDex == null) {
                 packagedApk.get().asFile,
             )
             if (carPlusAudioRelay) args("--audio-java", file(System.getProperty("java.home")).resolve("bin/java"))
+            if (carPlusWfdProfileControl) args("--wfd-profile-control")
             args("--video-java", file(System.getProperty("java.home")).resolve("bin/java"))
         }
     }
