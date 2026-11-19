@@ -1,6 +1,8 @@
 package io.github.shaonialife.carptocar.video
 
-/** Reads encoded dimensions from a H.264 SPS for video passthrough compatibility checks. */
+import java.io.ByteArrayOutputStream
+
+/** Reads and adjusts the display crop in an H.264 SPS. */
 internal object H264Sps {
 
     /** 从**单个 SPS NAL**（首字节是 NAL 头 0x67，不含起始码）解析宽高。 */
@@ -10,8 +12,61 @@ internal object H264Sps {
             // 跳过 NAL 头，并剔除 emulation prevention bytes（00 00 03 → 00 00）。
             // 漏这一步会让 bit 流整体错位，解出 272x112 之类的垃圾值。
             val rbsp = stripEmulation(nal, 1, nal.size)
-            parseRbsp(rbsp)
+            parseRbsp(rbsp).dimensions
         }.getOrNull()
+    }
+
+    /** Increase the existing bottom crop of a progressive 4:2:0 SPS by [pixels]. */
+    fun cropBottom(nal: ByteArray, pixels: Int): ByteArray? {
+        if (nal.size < 8 || (nal[0].toInt() and 0x1f) != 7) return null
+        return runCatching {
+            val rbsp = stripEmulation(nal, 1, nal.size)
+            val sps = parseRbsp(rbsp)
+            val crop = sps.bottomCrop ?: return null
+            if (!sps.progressive420 || pixels <= 0 || pixels % 2 != 0 || pixels >= sps.dimensions.second) return null
+
+            // Copy through rbsp_stop_one_bit, then zero-pad to the new byte boundary.
+            val lastByte = rbsp.indexOfLast { it != 0.toByte() }
+            val bitEnd = (lastByte + 1) * 8 - Integer.numberOfTrailingZeros(rbsp[lastByte].toInt() and 0xff)
+            if (crop.end >= bitEnd) return null
+            val code = crop.offset + pixels / 2 + 1
+            val codeBits = Integer.SIZE - Integer.numberOfLeadingZeros(code)
+            val newBitCount = crop.start + 2 * codeBits - 1 + bitEnd - crop.end
+            val edited = ByteArray((newBitCount + 7) / 8)
+            var position = 0
+            fun writeBit(bit: Int) {
+                val byte = position ushr 3
+                edited[byte] = (edited[byte].toInt() or (bit shl (7 - (position and 7)))).toByte()
+                position++
+            }
+
+            val reader = BitReader(rbsp)
+            repeat(crop.start) { writeBit(reader.u1()) }
+            position += codeBits - 1 // Exp-Golomb leading zeros.
+            for (bit in codeBits - 1 downTo 0) writeBit((code ushr bit) and 1)
+            repeat(crop.end - crop.start) { reader.u1() }
+            repeat(bitEnd - crop.end) { writeBit(reader.u1()) }
+
+            escapeNal(nal[0], edited).takeIf {
+                parseNal(it) == (sps.dimensions.first to sps.dimensions.second - pixels)
+            }
+        }.getOrNull()
+    }
+
+    private fun escapeNal(header: Byte, rbsp: ByteArray): ByteArray {
+        val nal = ByteArrayOutputStream(rbsp.size + 1)
+        nal.write(header.toInt())
+        var zeros = 0
+        for (byte in rbsp) {
+            val value = byte.toInt() and 0xff
+            if (zeros == 2 && value <= 3) {
+                nal.write(3)
+                zeros = 0
+            }
+            nal.write(value)
+            zeros = if (value == 0) zeros + 1 else 0
+        }
+        return nal.toByteArray()
     }
 
     private fun stripEmulation(
@@ -35,7 +90,8 @@ internal object H264Sps {
     }
 
     private class BitReader(private val data: ByteArray) {
-        private var bitPos = 0
+        var bitPos = 0
+            private set
 
         fun u1(): Int {
             val byteIndex = bitPos ushr 3
@@ -69,7 +125,15 @@ internal object H264Sps {
         }
     }
 
-    private fun parseRbsp(rbsp: ByteArray): Pair<Int, Int> {
+    private data class BottomCrop(val offset: Int, val start: Int, val end: Int)
+
+    private data class ParsedSps(
+        val dimensions: Pair<Int, Int>,
+        val bottomCrop: BottomCrop?,
+        val progressive420: Boolean,
+    )
+
+    private fun parseRbsp(rbsp: ByteArray): ParsedSps {
         val r = BitReader(rbsp)
         val profileIdc = r.u(8)
         r.u(8) // constraint_set0..5 + reserved（8 位，多读一位会让后面全部错位）
@@ -115,12 +179,14 @@ internal object H264Sps {
         var cropLeft = 0
         var cropRight = 0
         var cropTop = 0
-        var cropBottom = 0
+        var bottomCrop: BottomCrop? = null
         if (r.u1() == 1) { // frame_cropping_flag
             cropLeft = r.ue()
             cropRight = r.ue()
             cropTop = r.ue()
-            cropBottom = r.ue()
+            val start = r.bitPos
+            val offset = r.ue()
+            bottomCrop = BottomCrop(offset, start, r.bitPos)
         }
 
         val subWidthC = if (chromaFormatIdc == 3 || separateColourPlane) 1 else 2
@@ -131,9 +197,9 @@ internal object H264Sps {
         }
         val width = widthMbs * 16 - (cropLeft + cropRight) * subWidthC
         val height = (2 - frameMbsOnly) * heightMapUnits * 16 -
-            (cropTop + cropBottom) * subHeightC * (2 - frameMbsOnly)
+            (cropTop + (bottomCrop?.offset ?: 0)) * subHeightC * (2 - frameMbsOnly)
         if (width <= 0 || height <= 0) throw IllegalStateException("bad sps size")
-        return width to height
+        return ParsedSps(width to height, bottomCrop, frameMbsOnly == 1 && chromaFormatIdc == 1)
     }
 
     private fun skipScalingList(

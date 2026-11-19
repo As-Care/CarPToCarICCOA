@@ -264,7 +264,10 @@ internal object CarPlusReceiver {
         if (encodedVideo != null || !sender.isRunning) return
         try {
             val (input, output) = ParcelFileDescriptor.createSocketPair()
-            val video = CarPlusEncodedVideo(input, sender, encodedSize, allowOtherProfiles, main) { failed, reason, format ->
+            val video = CarPlusEncodedVideo(
+                input, sender, encodedSize, allowOtherProfiles, main,
+                cropAudiStream = encodedRoute?.request?.audiBaseline == true,
+            ) { failed, reason, format ->
                 if (encodedVideo === failed) fallBack(sender, reason, format)
             }
             encodedVideo = video

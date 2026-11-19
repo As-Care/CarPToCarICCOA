@@ -28,7 +28,11 @@ internal object CarPlusVideo {
 
     data class AvcFormat(val size: Size, val profile: Int) {
         fun canForwardTo(output: Size, acceptsOtherProfiles: Boolean): Boolean =
-            size == output && (profile == 66 || acceptsOtherProfiles)
+            size == output && (profile == AVC_BASELINE || acceptsOtherProfiles)
+
+        fun canCropToAudiCanvas(output: Size): Boolean =
+            profile == AVC_BASELINE && output == audiCanvas && size.width == output.width &&
+                size.height == output.height + 2
 
         override fun toString(): String = "${size.width}×${size.height}，profile $profile"
     }
@@ -53,6 +57,7 @@ internal object CarPlusVideo {
 
     val defaultSize = Size(WIDTH, HEIGHT)
     val audiCanvas = Size(1412, 654)
+    private const val AVC_BASELINE = 66
 
     fun displaySize(width: Int, height: Int): Size? =
         if (width in 320..4096 && height in 180..2304) Size(width, height) else null

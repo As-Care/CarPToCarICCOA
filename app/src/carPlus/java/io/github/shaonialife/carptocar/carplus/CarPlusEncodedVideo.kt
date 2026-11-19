@@ -18,6 +18,7 @@ internal class CarPlusEncodedVideo(
     private val outputSize: CarPlusVideo.Size,
     private val allowOtherProfiles: Boolean,
     private val main: Handler,
+    private val cropAudiStream: Boolean = false,
     private val onFailure: (CarPlusEncodedVideo, String, CarPlusVideo.AvcFormat?) -> Unit,
 ) {
     @Volatile private var cancelled = false
@@ -48,6 +49,7 @@ internal class CarPlusEncodedVideo(
     }
 
     private fun read() {
+        var sourceSps: ByteArray? = null
         var sps: ByteArray? = null
         var pps: ByteArray? = null
         var failure = "ICCOA 直通管道已关闭"
@@ -57,6 +59,7 @@ internal class CarPlusEncodedVideo(
                 while (!cancelled && sender.isRunning) {
                     val size = stream.readInt()
                     if (size == 0) {
+                        sourceSps = null
                         sps = null
                         pps = null
                         awaitKeyFrame()
@@ -69,18 +72,26 @@ internal class CarPlusEncodedVideo(
                     val units = sender.splitAnnexB(frame)
                     val newSps = units.firstOrNull { nalType(it) == 7 }
                     val newPps = units.firstOrNull { nalType(it) == 8 }
-                    if (newSps != null && !newSps.contentEquals(sps)) {
+                    if (newSps != null && !newSps.contentEquals(sourceSps)) {
                         val dimensions = H264Sps.parseNal(newSps) ?: throw IOException("无法解析源 H.264 SPS")
                         val format = CarPlusVideo.AvcFormat(
                             CarPlusVideo.Size(dimensions.first, dimensions.second), newSps[1].toInt() and 0xff,
                         )
-                        if (!format.canForwardTo(outputSize, allowOtherProfiles)) {
+                        val compatibleSps = when {
+                            format.canForwardTo(outputSize, allowOtherProfiles) -> newSps
+                            cropAudiStream && format.canCropToAudiCanvas(outputSize) ->
+                                H264Sps.cropBottom(newSps, format.size.height - outputSize.height)
+                            else -> null
+                        }
+                        if (compatibleSps == null) {
                             incompatibleFormat = format
                             throw IOException("源 H.264 档位不兼容（$format，目标 ${outputSize.width}×${outputSize.height}）")
                         }
-                        sps = newSps
+                        sourceSps = newSps
+                        sps = compatibleSps
                         awaitKeyFrame()
-                        SessionController.appendLog("ICCOA: 源 H.264 SPS $format")
+                        val cropLog = if (compatibleSps === newSps) "" else " · SPS 裁切至 ${outputSize.width}×${outputSize.height}"
+                        SessionController.appendLog("ICCOA: 源 H.264 SPS $format$cropLog")
                     }
                     if (newPps != null && !newPps.contentEquals(pps)) {
                         pps = newPps
@@ -89,10 +100,17 @@ internal class CarPlusEncodedVideo(
                     val idr = units.any { nalType(it) == 5 }
                     if (waitingForKeyFrame && (!idr || sps == null || pps == null)) continue
                     if (units.none { nalType(it) in 1..5 }) continue
-                    val nals = if (idr && sps != null && pps != null && (newSps == null || newPps == null)) {
-                        listOf(sps, pps) + units.filter { nalType(it) != 7 && nalType(it) != 8 }
-                    } else {
-                        units
+                    val croppedSps = sps?.takeIf { it !== sourceSps }
+                    if (newSps != null && croppedSps != null &&
+                        units.any { nalType(it) == 7 && !it.contentEquals(newSps) }
+                    ) {
+                        throw IOException("源 H.264 包含多个 SPS，无法裁切直通")
+                    }
+                    val nals = when {
+                        idr && sps != null && pps != null && (newSps == null || newPps == null) ->
+                            listOf(sps, pps) + units.filter { nalType(it) != 7 && nalType(it) != 8 }
+                        newSps != null && croppedSps != null -> units.map { if (nalType(it) == 7) croppedSps else it }
+                        else -> units
                     }
                     if (sender.submitH264Nals(nals, idr, timestampUs / 1_000) && waitingForKeyFrame) {
                         waitingForKeyFrame = false
