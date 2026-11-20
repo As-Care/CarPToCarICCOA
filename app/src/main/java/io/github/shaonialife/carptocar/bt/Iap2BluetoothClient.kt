@@ -23,7 +23,7 @@ import java.util.concurrent.atomic.AtomicReference
  * 真无线 CarPlay 建链方向（对照 carplay-wifi-extractor client 模式，已在真车验证）：
  * 手机与车机完成系统级蓝牙配对后，由**手机主动连入**车机 SDP 广播的配件端服务
  * （UUID 00000000-deca-fade-deca-deafdecacaff，奥迪 MIB3 SDP 实测存在）；
- * 车机从不主动回连手机（测试台 DiPlay 会回连，那是接收端的测试行为）。
+ * 车机也可主动连入手机，由 [Iap2BluetoothServer] 接收。
  *
  * 连上后复用与测试台完全相同的发送端 bring-up（[Iap2SenderSession]），
  * 成功时回调 [onEndpoint] 交出热点凭据与 AirPlay 端点。
@@ -87,6 +87,7 @@ class Iap2BluetoothClient(
 
         /** 从首次直连开始给车机留出回连窗口。AUDI 4930 曾在约 4 秒时主动连入。 */
         private const val CAR_RECONNECT_WINDOW_MILLIS = 6_000L
+        private const val AUDI_AUTOMATIC_RECONNECT_WAIT_MILLIS = 12_000L
 
         /** 目标连不上多少轮后放开限制（16s/轮 → 约 32s 后回退，避免一个死目标堵死整轮）。 */
         private const val TARGET_FALLBACK_ROUNDS = 2
@@ -297,7 +298,7 @@ class Iap2BluetoothClient(
             PackageManager.PERMISSION_GRANTED
 
     @Synchronized
-    fun start(): Boolean {
+    fun start(automatic: Boolean = false, inboundListening: Boolean = false): Boolean {
         if (running) return true
         if (!hasPermission()) {
             log("BT-C: 缺少 BLUETOOTH_CONNECT 权限")
@@ -320,6 +321,9 @@ class Iap2BluetoothClient(
         running = true
         val myGeneration = generation.incrementAndGet()
         val target = targetProvider()
+        val automaticAudiTarget = target?.takeIf {
+            automatic && (it.name.startsWith("Audi", ignoreCase = true) || it.name.startsWith("奥迪"))
+        }
         log(
             "BT-C: 启动——将主动连入车机的无线 iAP2 服务（…caff）" +
                 if (target != null) {
@@ -328,7 +332,7 @@ class Iap2BluetoothClient(
                     "（未指定目标：依次尝试全部候选设备，可在「连接准备」中指定）"
                 },
         )
-        Thread({ connectLoop(myGeneration) }, "iap2-bt-client").apply {
+        Thread({ connectLoop(myGeneration, automaticAudiTarget, inboundListening) }, "iap2-bt-client").apply {
             isDaemon = true
             thread = this
             start()
@@ -337,13 +341,23 @@ class Iap2BluetoothClient(
     }
 
     @SuppressLint("MissingPermission")
-    private fun connectLoop(myGeneration: Long) {
+    private fun connectLoop(
+        myGeneration: Long,
+        automaticAudiTarget: TargetDevicePrefs.Target?,
+        inboundListening: Boolean,
+    ) {
         val adapter =
             try {
                 context.getSystemService(BluetoothManager::class.java)?.adapter
             } catch (_: Exception) {
                 null
             } ?: return
+        if (automaticAudiTarget != null && inboundListening) {
+            log("BT-C: 奥迪自动连接 · 保留通话和媒体蓝牙，先等车机回连 ${AUDI_AUTOMATIC_RECONNECT_WAIT_MILLIS / 1000} 秒")
+            if (waitForCarInitiated(myGeneration, AUDI_AUTOMATIC_RECONNECT_WAIT_MILLIS, BACKOFF_POLL_MILLIS)) {
+                log("BT-C: 等待奥迪回连超时 · 保留普通蓝牙，开始主动拨 iAP2")
+            }
+        }
         var lastFailureLogAt = 0L
         var targetFailRounds = 0
         /** 连续「SDP 层失败」的轮数（见 [PASSIVE_FALLBACK_ROUNDS]）。 */
@@ -393,6 +407,8 @@ class Iap2BluetoothClient(
                 sleepQuietly(2_000)
                 continue
             }
+            val preserveAudiProfiles = recoveryPeers == null && automaticAudiTarget != null &&
+                TargetDevicePrefs.matches(automaticAudiTarget, targetProvider()?.address)
             val candidates =
                 if (recoveryPeers == null) {
                     candidateDevices(adapter)
@@ -446,8 +462,9 @@ class Iap2BluetoothClient(
                     }
                     continue
                 }
-                // SDP 未知时只探一次个人音频设备，保留其通话和媒体连接。
-                val allowProfileFallback = gate == Iap2Service.HAS || !looksLikePersonalAudio(device)
+                // 奥迪自动连接和未确认的个人音频设备只拨一次，保留通话和媒体连接。
+                val allowProfileFallback = !preserveAudiProfiles &&
+                    (gate == Iap2Service.HAS || !looksLikePersonalAudio(device))
                 val canAttempt = {
                     running && generation.get() == myGeneration &&
                         !BtSessionGate.inboundActive &&
@@ -462,12 +479,12 @@ class Iap2BluetoothClient(
                     waitForCar = {
                         val reason = lastConnectError ?: "原因未知"
                         log("BT-C: 首次直连「$name」失败（$reason）——保留蓝牙，等待车机回连后再试")
-                        while (canAttempt()) {
-                            val remaining = reconnectDeadline - SystemClock.uptimeMillis()
-                            if (remaining <= 0) break
-                            sleepQuietly(minOf(remaining, BACKOFF_POLL_MILLIS))
+                        val readyToRetry = awaitIap2DialWindow(
+                            reconnectDeadline, BACKOFF_POLL_MILLIS, SystemClock::uptimeMillis, ::sleepQuietly, canAttempt,
+                        )
+                        if (readyToRetry) {
+                            log("BT-C: 仍未收到「$name」回连——保留蓝牙再试一次")
                         }
-                        if (canAttempt()) log("BT-C: 仍未收到「$name」回连——保留蓝牙再试一次")
                     },
                     disconnectProfiles = { disconnectProfilesForRetry(device, name, canAttempt) },
                 )
@@ -516,9 +533,8 @@ class Iap2BluetoothClient(
             if (connected == null) {
                 // 目标连续连不上 → 放开目标限制（见 BtSessionGate.targetSoftFallback）。
                 // 只在「用户指定了目标」时计数，且只降级一次。
-                // 补连控制链路期间（recoveryPeers != null）不计数：那不是「这次坐的是另一台车」，
-                // 放开限制只会让补连轮次去拨耳机/音箱，白白浪费恢复窗口。
-                if (recoveryPeers == null &&
+                // 奥迪自动连接和控制链路补连始终保留所选目标，避免尝试其他已配对设备。
+                if (recoveryPeers == null && !preserveAudiProfiles &&
                     targetProvider() != null &&
                     !BtSessionGate.targetSoftFallback
                 ) {
@@ -621,14 +637,11 @@ class Iap2BluetoothClient(
             "BT-C: 主动连 …caff 连续 $PASSIVE_FALLBACK_ROUNDS 轮在 SDP 层就失败（车机没广播配件端服务）" +
                 "——切换为等车机主动连入，最长 ${PASSIVE_WAIT_MILLIS / 1000} 秒（本机 …cafe 监听仍在运行）",
         )
-        val deadline = android.os.SystemClock.uptimeMillis() + PASSIVE_WAIT_MILLIS
-        while (running && generation.get() == myGeneration) {
-            if (BtSessionGate.inboundActive || BtSessionGate.sessionActive) {
+        if (!waitForCarInitiated(myGeneration, PASSIVE_WAIT_MILLIS, PASSIVE_POLL_MILLIS)) {
+            if (running && generation.get() == myGeneration) {
                 log("BT-C: 被动窗口内车机主动连入——不再探测 …caff")
-                return
             }
-            if (android.os.SystemClock.uptimeMillis() >= deadline) break
-            sleepQuietly(PASSIVE_POLL_MILLIS)
+            return
         }
         if (!running || generation.get() != myGeneration) return
         log(
@@ -636,6 +649,11 @@ class Iap2BluetoothClient(
                 "若长期如此，请确认车机是否启用无线 CarPlay（仅支持有线的车型不会有任何无线 iAP2 服务）",
         )
     }
+
+    private fun waitForCarInitiated(myGeneration: Long, durationMillis: Long, pollMillis: Long): Boolean =
+        awaitIap2DialWindow(SystemClock.uptimeMillis() + durationMillis, pollMillis, SystemClock::uptimeMillis, ::sleepQuietly) {
+            running && generation.get() == myGeneration && !BtSessionGate.inboundActive && !BtSessionGate.sessionActive
+        }
 
     /**
      * 候选设备：优先 SDP 缓存里带配件端 UUID 的已配对设备；
@@ -831,6 +849,22 @@ class Iap2BluetoothClient(
             sleepQuietly(BACKOFF_POLL_MILLIS)
         }
     }
+}
+
+/** True if the wait expires while this connection attempt is still allowed to dial. */
+internal fun awaitIap2DialWindow(
+    deadlineMillis: Long,
+    pollMillis: Long,
+    uptimeMillis: () -> Long,
+    sleep: (Long) -> Unit,
+    canDial: () -> Boolean,
+): Boolean {
+    while (canDial()) {
+        val remaining = deadlineMillis - uptimeMillis()
+        if (remaining <= 0) return true
+        sleep(minOf(remaining, pollMillis))
+    }
+    return false
 }
 
 /** 只有保留蓝牙的两次直连都失败，才允许断开通话和媒体蓝牙后再拨。 */

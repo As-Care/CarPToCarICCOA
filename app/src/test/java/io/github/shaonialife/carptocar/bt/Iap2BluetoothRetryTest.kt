@@ -1,10 +1,34 @@
 package io.github.shaonialife.carptocar.bt
 
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
+import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class Iap2BluetoothRetryTest {
+    @Test
+    fun initialListenWindowAllowsDialingAtTheDeadline() {
+        var now = 1_000L
+        val deadline = now + 12_000L
+
+        assertTrue(awaitIap2DialWindow(deadline, 250L, { now }, { now += it }) { true })
+        assertEquals(deadline, now)
+    }
+
+    @Test
+    fun inboundCarStopsTheInitialWaitBeforeAnyDial() {
+        var now = 0L
+
+        assertFalse(awaitIap2DialWindow(12_000L, 250L, { now }, { now += it }) { now < 9_000L })
+        assertEquals(9_000L, now)
+    }
+
+    @Test
+    fun cancelledConnectionCannotDialEvenAfterTheDeadline() {
+        assertFalse(awaitIap2DialWindow(12_000L, 250L, { 12_000L }, { error("Cancelled wait") }) { false })
+    }
+
     @Test
     fun firstSuccessSkipsTheWaitAndProfileTeardown() {
         val car = ConnectionAttempts("first")
@@ -50,6 +74,17 @@ class Iap2BluetoothRetryTest {
         val car = ConnectionAttempts(null)
 
         assertNull(car.connect(allowProfileFallback = false))
+        assertEquals(listOf("connect"), car.events)
+    }
+
+    @Test
+    fun profilePreservingModeOnlyDialsOnceAfterTheInitialWait() {
+        val car = ConnectionAttempts(null, "fallback")
+        var now = 0L
+
+        if (awaitIap2DialWindow(12_000L, 250L, { now }, { now += it }) { true }) {
+            assertNull(car.connect(allowProfileFallback = false))
+        }
         assertEquals(listOf("connect"), car.events)
     }
 

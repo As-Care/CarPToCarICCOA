@@ -1,3 +1,3 @@
 ### 更新内容
-- 优化 `H264Sps` 解析与 `CarPlusEncodedVideo` / `CarPlusVideo` 视频编码流格式处理
-- 补充 `CarPlusAvcFormatTest` 单元测试用例
+- 优化 `Iap2BluetoothClient` 蓝牙连接与重试逻辑，并同步优化 `SessionController` 与 `MainActivity` 连接状态交互
+- 补充 `Iap2BluetoothRetryTest` 单元测试覆盖

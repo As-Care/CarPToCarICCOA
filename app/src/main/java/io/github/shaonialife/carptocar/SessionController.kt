@@ -742,6 +742,7 @@ object SessionController {
 
     private val connectionHandler = android.os.Handler(android.os.Looper.getMainLooper())
     @Volatile private var pendingBluetoothStart: Runnable? = null
+    @Volatile private var automaticConnection = false
     private var bluetoothRestartAt = 0L
     @Volatile var disconnecting = false
         private set
@@ -932,8 +933,8 @@ object SessionController {
     /** 恢复前把蓝牙组件拉起来（已运行则空操作）。真车/测试台两条路径都拉，判断交给组件自身。 */
     private fun restartBluetoothForRecovery() {
         if (bluetoothClient?.isRunning == true && bluetoothServer?.isRunning == true) return
-        runCatching { bluetoothClient?.start() }
-        runCatching { bluetoothServer?.start() }
+        val listening = runCatching { bluetoothServer?.start() }.getOrNull() == true
+        runCatching { bluetoothClient?.start(automaticConnection, inboundListening = listening && lastGoodEndpoint == null) }
         appendLog("PROC: 蓝牙链路已重新拉起（等车机重新下发 0x4301）")
     }
 
@@ -1461,7 +1462,7 @@ object SessionController {
      * 「启动连接」主体（权限检查由 Activity 完成后调用）：前台保活服务 + 双向蓝牙。
      * 幂等：已有会话时 BT 组件的 start() 自行短路，不会双开。
      */
-    fun startConnection(context: Context) {
+    fun startConnection(context: Context, automatic: Boolean = false) {
         if (disconnecting || pendingBluetoothStart != null) return
         if (!BuildConfig.CAR_PLUS_RUNTIME) {
             appendLog("ICCOA: 编译验证包缺少车端 SDK，无法启动 ICCOA → CarPlay 会话")
@@ -1480,6 +1481,7 @@ object SessionController {
         // RTSP 全量报文落盘（files/rtsp-YYYYMMDD.log）
         io.github.shaonialife.carptocar.util.RtspDump.init(context.filesDir)
         // 用户明确要连：解冻恢复的前提之一（断开后再解冻不该自己爬起来）
+        automaticConnection = automatic
         sessionWanted = true
         // 用户主动开链 = 解除「别再挂机」的抑制；这一轮由连接流程自己拉监听，
         // 不算挂机态（否则 isSessionRunning 会漏判）
@@ -1496,7 +1498,7 @@ object SessionController {
         wifiLinkLost = false
         wifiWatchdog?.start()
         // 报文录制分界：一次点击 = 一段独立对话，事后按这行切分
-        SessionTrace.sessionStart("用户点击启动连接")
+        SessionTrace.sessionStart(if (automatic) "打开 App 后自动连接" else "用户点击启动连接")
         // 新一次用户点击 = 新的 5 分钟等待预算（断链重连不再重置，见 pendingWaitBudgetStartedAt）
         pendingWaitBudgetStartedAt = 0L
         pendingWaitGaveUp = false
@@ -1515,8 +1517,8 @@ object SessionController {
                 ctrlAdvertiser?.resetInviteCount()
                 // 首次广播要读取真实蓝牙地址，留在后台。
                 Bg.run("ctrl-publish") { if (sessionWanted) ctrlAdvertiser?.start() }
-                bluetoothServer?.start()
-                bluetoothClient?.start()
+                val listening = bluetoothServer?.start() == true
+                bluetoothClient?.start(automatic, inboundListening = listening)
             }
         }
         if (delay > 0) {
