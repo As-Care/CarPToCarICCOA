@@ -933,8 +933,8 @@ object SessionController {
     /** 恢复前把蓝牙组件拉起来（已运行则空操作）。真车/测试台两条路径都拉，判断交给组件自身。 */
     private fun restartBluetoothForRecovery() {
         if (bluetoothClient?.isRunning == true && bluetoothServer?.isRunning == true) return
-        val listening = runCatching { bluetoothServer?.start() }.getOrNull() == true
-        runCatching { bluetoothClient?.start(automaticConnection, inboundListening = listening && lastGoodEndpoint == null) }
+        runCatching { bluetoothServer?.start() }
+        runCatching { bluetoothClient?.start(automaticConnection) }
         appendLog("PROC: 蓝牙链路已重新拉起（等车机重新下发 0x4301）")
     }
 
@@ -1517,8 +1517,8 @@ object SessionController {
                 ctrlAdvertiser?.resetInviteCount()
                 // 首次广播要读取真实蓝牙地址，留在后台。
                 Bg.run("ctrl-publish") { if (sessionWanted) ctrlAdvertiser?.start() }
-                val listening = bluetoothServer?.start() == true
-                bluetoothClient?.start(automatic, inboundListening = listening)
+                bluetoothServer?.start()
+                bluetoothClient?.start(automatic)
             }
         }
         if (delay > 0) {

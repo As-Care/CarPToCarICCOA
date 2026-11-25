@@ -8,25 +8,25 @@ import org.junit.Test
 
 class Iap2BluetoothRetryTest {
     @Test
-    fun initialListenWindowAllowsDialingAtTheDeadline() {
+    fun listenWindowAllowsDialingAtTheDeadline() {
         var now = 1_000L
-        val deadline = now + 12_000L
+        val deadline = now + 6_000L
 
         assertTrue(awaitIap2DialWindow(deadline, 250L, { now }, { now += it }) { true })
         assertEquals(deadline, now)
     }
 
     @Test
-    fun inboundCarStopsTheInitialWaitBeforeAnyDial() {
+    fun inboundCarStopsTheWaitBeforeTheNextDial() {
         var now = 0L
 
-        assertFalse(awaitIap2DialWindow(12_000L, 250L, { now }, { now += it }) { now < 9_000L })
-        assertEquals(9_000L, now)
+        assertFalse(awaitIap2DialWindow(6_000L, 250L, { now }, { now += it }) { now < 4_000L })
+        assertEquals(4_000L, now)
     }
 
     @Test
     fun cancelledConnectionCannotDialEvenAfterTheDeadline() {
-        assertFalse(awaitIap2DialWindow(12_000L, 250L, { 12_000L }, { error("Cancelled wait") }) { false })
+        assertFalse(awaitIap2DialWindow(6_000L, 250L, { 6_000L }, { error("Cancelled wait") }) { false })
     }
 
     @Test
@@ -78,13 +78,26 @@ class Iap2BluetoothRetryTest {
     }
 
     @Test
-    fun profilePreservingModeOnlyDialsOnceAfterTheInitialWait() {
+    fun audiReleasesProfilesAfterTheFirstFailureAndRetriesImmediately() {
         val car = ConnectionAttempts(null, "fallback")
-        var now = 0L
 
-        if (awaitIap2DialWindow(12_000L, 250L, { now }, { now += it }) { true }) {
-            assertNull(car.connect(allowProfileFallback = false))
-        }
+        assertEquals("fallback", car.connect(retryBeforeDisconnect = false))
+        assertEquals(listOf("connect", "disconnect profiles", "connect"), car.events)
+    }
+
+    @Test
+    fun audiStillRetriesWhenNoProfilesAreConnected() {
+        val car = ConnectionAttempts(null, "fallback")
+
+        assertEquals("fallback", car.connect(retryBeforeDisconnect = false, profilesConnected = false))
+        assertEquals(listOf("connect", "disconnect profiles", "connect"), car.events)
+    }
+
+    @Test
+    fun audiSkipsProfileTeardownWhenInboundWinsDuringTheFirstDial() {
+        val car = ConnectionAttempts(null)
+
+        assertNull(car.connect(retryBeforeDisconnect = false, carReturnsAfterFirstDial = true))
         assertEquals(listOf("connect"), car.events)
     }
 
@@ -94,6 +107,9 @@ class Iap2BluetoothRetryTest {
 
         fun connect(
             allowProfileFallback: Boolean = true,
+            retryBeforeDisconnect: Boolean = true,
+            profilesConnected: Boolean = true,
+            carReturnsAfterFirstDial: Boolean = false,
             carReturnsDuringWait: Boolean = false,
             cancelAfterAttempts: Int = Int.MAX_VALUE,
         ): String? {
@@ -101,10 +117,12 @@ class Iap2BluetoothRetryTest {
             var inboundConnected = false
             return connectWithProfileFallback(
                 allowProfileFallback = allowProfileFallback,
+                retryBeforeDisconnect = retryBeforeDisconnect,
                 canAttempt = { !inboundConnected && attempts < cancelAfterAttempts },
                 connect = {
                     events += "connect"
                     attempts++
+                    if (attempts == 1 && carReturnsAfterFirstDial) inboundConnected = true
                     results.next()
                 },
                 waitForCar = {
@@ -113,7 +131,7 @@ class Iap2BluetoothRetryTest {
                 },
                 disconnectProfiles = {
                     events += "disconnect profiles"
-                    true
+                    profilesConnected
                 },
             )
         }

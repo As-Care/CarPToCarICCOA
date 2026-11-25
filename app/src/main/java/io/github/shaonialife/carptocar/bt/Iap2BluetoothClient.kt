@@ -87,7 +87,6 @@ class Iap2BluetoothClient(
 
         /** 从首次直连开始给车机留出回连窗口。AUDI 4930 曾在约 4 秒时主动连入。 */
         private const val CAR_RECONNECT_WINDOW_MILLIS = 6_000L
-        private const val AUDI_AUTOMATIC_RECONNECT_WAIT_MILLIS = 12_000L
 
         /** 目标连不上多少轮后放开限制（16s/轮 → 约 32s 后回退，避免一个死目标堵死整轮）。 */
         private const val TARGET_FALLBACK_ROUNDS = 2
@@ -298,7 +297,7 @@ class Iap2BluetoothClient(
             PackageManager.PERMISSION_GRANTED
 
     @Synchronized
-    fun start(automatic: Boolean = false, inboundListening: Boolean = false): Boolean {
+    fun start(automatic: Boolean = false): Boolean {
         if (running) return true
         if (!hasPermission()) {
             log("BT-C: 缺少 BLUETOOTH_CONNECT 权限")
@@ -332,7 +331,7 @@ class Iap2BluetoothClient(
                     "（未指定目标：依次尝试全部候选设备，可在「连接准备」中指定）"
                 },
         )
-        Thread({ connectLoop(myGeneration, automaticAudiTarget, inboundListening) }, "iap2-bt-client").apply {
+        Thread({ connectLoop(myGeneration, automaticAudiTarget) }, "iap2-bt-client").apply {
             isDaemon = true
             thread = this
             start()
@@ -344,7 +343,6 @@ class Iap2BluetoothClient(
     private fun connectLoop(
         myGeneration: Long,
         automaticAudiTarget: TargetDevicePrefs.Target?,
-        inboundListening: Boolean,
     ) {
         val adapter =
             try {
@@ -352,12 +350,6 @@ class Iap2BluetoothClient(
             } catch (_: Exception) {
                 null
             } ?: return
-        if (automaticAudiTarget != null && inboundListening) {
-            log("BT-C: 奥迪自动连接 · 保留通话和媒体蓝牙，先等车机回连 ${AUDI_AUTOMATIC_RECONNECT_WAIT_MILLIS / 1000} 秒")
-            if (waitForCarInitiated(myGeneration, AUDI_AUTOMATIC_RECONNECT_WAIT_MILLIS, BACKOFF_POLL_MILLIS)) {
-                log("BT-C: 等待奥迪回连超时 · 保留普通蓝牙，开始主动拨 iAP2")
-            }
-        }
         var lastFailureLogAt = 0L
         var targetFailRounds = 0
         /** 连续「SDP 层失败」的轮数（见 [PASSIVE_FALLBACK_ROUNDS]）。 */
@@ -365,16 +357,7 @@ class Iap2BluetoothClient(
         /** 连续「没有有效会话」的轮数，用于 [RETRY_BACKOFF_MILLIS] 退避（连上即断也算）。 */
         var failStreak = 0
         connectLoop@ while (running && generation.get() == myGeneration) {
-            // 用户刚手动断开 → 先等车机「忘掉」上一轮，别急着拨。
-            //
-            // 2026-11-04 奥迪 4910（MIB3 4580）实录：16:22:32.519 手动断开，
-            // 16:22:33.696（1.2 秒后）重连。车机照常给了 iAP2 身份、0x5703 热点凭据，
-            // 但 **48 秒里一次 `_airplay._tcp` 都没广播、0x4301 也没回**——因为固件里
-            // `mediaDisconnectTimeout = 15000ms`，设备没被判「已移除」之前它只走
-            // `keepIAP2Session = 1` 分支：重开旧会话，不启动 projection。
-            // 结果是我们拿网关兜底、8 次重连全超时（fe80::1086:…:7000 after 2000ms）。
-            //
-            // 等够 [BtSessionGate.REACTIVATE_COOLDOWN_MILLIS] 再拨，这一次才是「新建会话」。
+            // 手动断开后的拨号冷却与界面的重连倒计时使用同一截止时间。
             val cooldownLeft = BtSessionGate.manualStopCooldownLeft(targetProvider()?.address)
             if (cooldownLeft > 0) {
                 sleepQuietly(cooldownLeft)
@@ -407,8 +390,9 @@ class Iap2BluetoothClient(
                 sleepQuietly(2_000)
                 continue
             }
-            val preserveAudiProfiles = recoveryPeers == null && automaticAudiTarget != null &&
-                TargetDevicePrefs.matches(automaticAudiTarget, targetProvider()?.address)
+            val selectedAutomaticAudi = automaticAudiTarget?.takeIf {
+                recoveryPeers == null && TargetDevicePrefs.matches(it, targetProvider()?.address)
+            }
             val candidates =
                 if (recoveryPeers == null) {
                     candidateDevices(adapter)
@@ -462,9 +446,11 @@ class Iap2BluetoothClient(
                     }
                     continue
                 }
-                // 奥迪自动连接和未确认的个人音频设备只拨一次，保留通话和媒体连接。
-                val allowProfileFallback = !preserveAudiProfiles &&
-                    (gate == Iap2Service.HAS || !looksLikePersonalAudio(device))
+                // 未确认的个人音频设备只拨一次，保留通话和媒体连接。
+                val allowProfileFallback = gate == Iap2Service.HAS || !looksLikePersonalAudio(device)
+                // 所选奥迪恢复 2.0.2 的时序：首次拨号失败就释放普通蓝牙，再拨一次。
+                val retryBeforeDisconnect = selectedAutomaticAudi == null ||
+                    !TargetDevicePrefs.matches(selectedAutomaticAudi, device.address)
                 val canAttempt = {
                     running && generation.get() == myGeneration &&
                         !BtSessionGate.inboundActive &&
@@ -474,6 +460,7 @@ class Iap2BluetoothClient(
                 val reconnectDeadline = SystemClock.uptimeMillis() + CAR_RECONNECT_WINDOW_MILLIS
                 val socket = connectWithProfileFallback(
                     allowProfileFallback = allowProfileFallback,
+                    retryBeforeDisconnect = retryBeforeDisconnect,
                     canAttempt = canAttempt,
                     connect = { tryConnect(device, myGeneration) },
                     waitForCar = {
@@ -486,7 +473,9 @@ class Iap2BluetoothClient(
                             log("BT-C: 仍未收到「$name」回连——保留蓝牙再试一次")
                         }
                     },
-                    disconnectProfiles = { disconnectProfilesForRetry(device, name, canAttempt) },
+                    disconnectProfiles = {
+                        disconnectProfilesForRetry(device, name, retryBeforeDisconnect, canAttempt)
+                    },
                 )
                 if (!canAttempt()) {
                     // 取消或车机抢先连入时，让出出站通道，不把这一轮算作失败。
@@ -534,7 +523,7 @@ class Iap2BluetoothClient(
                 // 目标连续连不上 → 放开目标限制（见 BtSessionGate.targetSoftFallback）。
                 // 只在「用户指定了目标」时计数，且只降级一次。
                 // 奥迪自动连接和控制链路补连始终保留所选目标，避免尝试其他已配对设备。
-                if (recoveryPeers == null && !preserveAudiProfiles &&
+                if (recoveryPeers == null && selectedAutomaticAudi == null &&
                     targetProvider() != null &&
                     !BtSessionGate.targetSoftFallback
                 ) {
@@ -599,6 +588,7 @@ class Iap2BluetoothClient(
     private fun disconnectProfilesForRetry(
         device: BluetoothDevice,
         name: String,
+        retryBeforeDisconnect: Boolean,
         canAttempt: () -> Boolean,
     ): Boolean {
         // 部分车机需要先释放通话和媒体蓝牙才会开放 iAP2，保留这条兼容路径。
@@ -608,8 +598,9 @@ class Iap2BluetoothClient(
         if (canAttempt() && now - lastProfileLogAt > PROFILE_LOG_THROTTLE_MILLIS) {
             lastProfileLogAt = now
             val left = BtProfiles.stillConnected(context, device.address)
+            val failedAttempts = if (retryBeforeDisconnect) "两次" else "首次"
             log(
-                "BT-C: 「$name」两次直连失败——已请求断开 ${dropped.joinToString("/")} 再试" +
+                "BT-C: 「$name」${failedAttempts}直连失败——已请求断开 ${dropped.joinToString("/")} 再试" +
                     if (left.isEmpty()) "" else "（仍有 ${left.joinToString("/")} 在线）",
             )
         }
@@ -867,9 +858,10 @@ internal fun awaitIap2DialWindow(
     return false
 }
 
-/** 只有保留蓝牙的两次直连都失败，才允许断开通话和媒体蓝牙后再拨。 */
+/** 首次直连失败后，可先保留普通蓝牙再拨一次，再释放配置文件重试。 */
 internal fun <Connection> connectWithProfileFallback(
     allowProfileFallback: Boolean,
+    retryBeforeDisconnect: Boolean = true,
     canAttempt: () -> Boolean,
     connect: () -> Connection?,
     waitForCar: () -> Unit,
@@ -878,10 +870,15 @@ internal fun <Connection> connectWithProfileFallback(
     if (!canAttempt()) return null
     connect()?.let { return it }
     if (!allowProfileFallback || !canAttempt()) return null
-    waitForCar()
+    if (retryBeforeDisconnect) {
+        waitForCar()
+        if (!canAttempt()) return null
+        connect()?.let { return it }
+    }
     if (!canAttempt()) return null
-    connect()?.let { return it }
-    if (!canAttempt() || !disconnectProfiles() || !canAttempt()) return null
+    val disconnected = disconnectProfiles()
+    // 奥迪的首次失败即进入重试，即使没有已连接的配置文件需要断开。
+    if (!canAttempt() || (retryBeforeDisconnect && !disconnected)) return null
     return connect()
 }
 
@@ -953,15 +950,15 @@ object BtSessionGate {
      * 热点和凭据 → 之后 48 秒里 mDNS 一直是「未发现」，只能拿网关兜底，8 次重连全超时。
      * 而前一轮（车机主动连入、它自己启动的 projection）10 秒就连上了。
      *
-     * 所以：手动断开后要给车机留足 [REACTIVATE_COOLDOWN_MILLIS] 再发起。
+     * App 等待 [REACTIVATE_COOLDOWN_MILLIS] 后发起重连。车机释放旧会话所需的时间由固件决定。
      */
     private data class ManualStop(val address: String?, val at: Long)
 
     @Volatile
     private var manualStop: ManualStop? = null
 
-    /** Audi's 15-second removal window plus a guard interval. */
-    private const val REACTIVATE_COOLDOWN_MILLIS = 18_000L
+    /** Delay before initiating a new connection after manual disconnection. */
+    private const val REACTIVATE_COOLDOWN_MILLIS = 5_000L
 
     fun noteManualStop(address: String?) {
         manualStop = ManualStop(address, android.os.SystemClock.uptimeMillis())
