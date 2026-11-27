@@ -744,8 +744,10 @@ object SessionController {
     @Volatile private var pendingBluetoothStart: Runnable? = null
     @Volatile private var automaticConnection = false
     private var bluetoothRestartAt = 0L
-    @Volatile var disconnecting = false
-        private set
+    private enum class DisconnectAction { STOP, CAR_DEPARTED, RECONNECT_CAR }
+    @Volatile private var pendingDisconnect: DisconnectAction? = null
+    val disconnecting: Boolean get() = pendingDisconnect != null
+    val reconnectingCar: Boolean get() = pendingDisconnect == DisconnectAction.RECONNECT_CAR
 
     fun reconnectWaitSeconds(): Long? {
         if (pendingBluetoothStart == null) return null
@@ -1544,7 +1546,24 @@ object SessionController {
 
     /** 「断开连接」（可在任意 Activity 实例上调用——操作的是真管线对象）。 */
     fun disconnect(context: Context, carDeparted: Boolean = false, graceful: Boolean = true) {
+        val action = if (carDeparted) DisconnectAction.CAR_DEPARTED else DisconnectAction.STOP
+        // 完整断开或离车优先于正在等 TEARDOWN 回复的手动车机重连。
+        if (pendingDisconnect == DisconnectAction.RECONNECT_CAR) {
+            pendingDisconnect = action
+            return
+        }
         if (disconnecting) return
+        beginDisconnect(context, action, graceful)
+    }
+
+    fun reconnectCar(context: Context): Boolean {
+        if (disconnecting || !sessionWanted || connectCancelled || sessionStarting.get() || !isStreaming()) return false
+        beginDisconnect(context, DisconnectAction.RECONNECT_CAR, graceful = true)
+        return true
+    }
+
+    private fun beginDisconnect(context: Context, action: DisconnectAction, graceful: Boolean) {
+        pendingDisconnect = action
         CarIdleGuard.cancel(context)
         pendingBluetoothStart?.let(connectionHandler::removeCallbacks)
         pendingBluetoothStart = null
@@ -1552,7 +1571,7 @@ object SessionController {
         connectCancelled = true
         val activeClient = currentClient?.takeIf { isStreaming() }
         val peer = carPlayPeerAddress()
-        val keepAllPlayChannel = graceful && !carDeparted &&
+        val keepAllPlayChannel = graceful && action != DisconnectAction.CAR_DEPARTED &&
             activeClient?.receiverIdentity()?.startsWith("AllPlay ", ignoreCase = true) == true
         // 用户终态：解冻恢复不得再自动把会话拉起来
         sessionWanted = false
@@ -1569,14 +1588,19 @@ object SessionController {
         }
         pendingEndpointUpdate = null
         val finish = Runnable {
-            finishDisconnect(context, carDeparted, keepAllPlayChannel)
-            if (!carDeparted && activeClient != null && !keepAllPlayChannel) {
+            val finalAction = pendingDisconnect ?: return@Runnable
+            val keepChannel = keepAllPlayChannel && finalAction != DisconnectAction.CAR_DEPARTED
+            try {
+                finishDisconnect(context, finalAction, keepChannel)
+            } finally {
+                pendingDisconnect = null
+            }
+            if (finalAction != DisconnectAction.CAR_DEPARTED && activeClient != null && !keepChannel) {
                 BtSessionGate.noteManualStop(peer)
             }
-            disconnecting = false
+            if (finalAction == DisconnectAction.RECONNECT_CAR) startConnection(context)
         }
-        if (graceful && !carDeparted && activeClient != null) {
-            disconnecting = true
+        if (graceful && action != DisconnectAction.CAR_DEPARTED && activeClient != null) {
             // The RTSP response is bounded, and closing the old socket also unblocks a stuck write.
             connectionHandler.postDelayed(finish, 1_500L)
             Bg.run("airplay-teardown") {
@@ -1596,9 +1620,15 @@ object SessionController {
         }
     }
 
-    private fun finishDisconnect(context: Context, carDeparted: Boolean, keepAllPlayChannel: Boolean) {
-        SessionTrace.sessionEnd(if (carDeparted) "车机离线" else "用户手动断开")
-        CarPlusReceiver.stop(stopNative = carDeparted)
+    private fun finishDisconnect(context: Context, action: DisconnectAction, keepAllPlayChannel: Boolean) {
+        val reconnectCar = action == DisconnectAction.RECONNECT_CAR
+        val carDeparted = action == DisconnectAction.CAR_DEPARTED
+        SessionTrace.sessionEnd(when (action) {
+            DisconnectAction.CAR_DEPARTED -> "车机离线"
+            DisconnectAction.RECONNECT_CAR -> "用户重新连接车机"
+            DisconnectAction.STOP -> "用户手动断开"
+        })
+        if (!reconnectCar) CarPlusReceiver.stop(stopNative = carDeparted)
         retireSession()
         // BT 控制会话只在这里（用户终态）退役，socket close 让保活读循环立刻退出：
         // 否则它阻塞到对端超时（实测 ~24s）才结束，用户取消后英雄卡持续转圈。
@@ -1606,15 +1636,19 @@ object SessionController {
         // bring-up failed 并拆整轮无线栈（含推流中的 AirPlay 会话，2026-10-16 实测）。
         phaseHint = null
         connectBudget.clearProgress()
-        CarPlayService.stop(context)
+        if (!reconnectCar) CarPlayService.stop(context)
         if (keepAllPlayChannel) bluetoothServer?.pauseForReconnect() else bluetoothServer?.stop()
         bluetoothClient?.stop()
         ctrlAdvertiser?.stop()
         endpointBrowser?.stop()
+        sessionStarting.set(false)
+        if (reconnectCar) {
+            appendLog("车机重连：已释放车机会话，保留 ICCOA 接收端和车机热点绑定")
+            return
+        }
         wifiConnector?.release()
         wifiWatchdog?.stop()
         boundCarSsid = null
-        sessionStarting.set(false)
         if (carDeparted) {
             appendLog("已停止车机连接、监听和保活服务")
         } else {

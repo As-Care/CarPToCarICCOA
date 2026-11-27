@@ -117,6 +117,7 @@ class MainActivity : AppCompatActivity() {
     private lateinit var heroProgress: View
     private lateinit var ctaButton: LinearLayout
     private lateinit var reconnectCarPlusButton: View
+    private lateinit var reconnectCarButton: View
     private lateinit var ctaIcon: ImageView
     private lateinit var ctaLabel: TextView
     private lateinit var readyBluetooth: TextView
@@ -739,6 +740,7 @@ class MainActivity : AppCompatActivity() {
         heroProgress = findViewById(R.id.heroProgress)
         ctaButton = findViewById(R.id.ctaButton)
         reconnectCarPlusButton = findViewById(R.id.btnReconnectCarPlus)
+        reconnectCarButton = findViewById(R.id.btnReconnectCar)
         ctaIcon = findViewById(R.id.ctaIcon)
         ctaLabel = findViewById(R.id.ctaLabel)
         readyBluetooth = findViewById(R.id.readyBluetooth)
@@ -923,6 +925,15 @@ class MainActivity : AppCompatActivity() {
                 snack("正在请求重新连接 Car+")
             } else {
                 snack("Car+ 接收端暂不可用")
+            }
+        }
+
+        reconnectCarButton.setOnClickListener {
+            if (SessionController.reconnectCar(applicationContext)) {
+                tickHero()
+                snack("正在重新连接车机，保留 Car+ 会话")
+            } else {
+                snack("车机连接状态正在变化，请稍候")
             }
         }
 
@@ -1161,6 +1172,7 @@ class MainActivity : AppCompatActivity() {
         }
         val s =
             when {
+                SessionController.reconnectingCar -> HeroState.CONNECTING
                 sender != null -> HeroState.CONNECTED
                 SessionController.isSessionRunning() || SessionController.sessionStarting.get() ->
                     HeroState.CONNECTING
@@ -1191,7 +1203,8 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun connectingMessage(): String =
-        SessionController.reconnectWaitSeconds()?.let {
+        if (SessionController.reconnectingCar) "正在释放车机连接…"
+        else SessionController.reconnectWaitSeconds()?.let {
             if (it > 0) "车机正在释放上次连接，约 ${it} 秒后自动重连"
             else "正在重新连接车机…"
         } ?: SessionController.carPlusConnectionMessage()
@@ -1353,7 +1366,7 @@ class MainActivity : AppCompatActivity() {
             }
         heroProgress.visibility = if (s == HeroState.CONNECTING) View.VISIBLE else View.GONE
         heroStats.visibility = if (s == HeroState.CONNECTED) View.VISIBLE else View.GONE
-        updateCarPlusReconnectButton(s == HeroState.CONNECTED && supportsSystemCarPlus)
+        updateReconnectButtons(s == HeroState.CONNECTED && supportsSystemCarPlus)
 
         when (s) {
             HeroState.IDLE -> {
@@ -1424,9 +1437,10 @@ class MainActivity : AppCompatActivity() {
         heroStats.visibility = if (flowing) View.VISIBLE else View.GONE
     }
 
-    private fun updateCarPlusReconnectButton(visible: Boolean) {
+    private fun updateReconnectButtons(visible: Boolean) {
         val visibility = if (visible) View.VISIBLE else View.GONE
         if (reconnectCarPlusButton.visibility != visibility) reconnectCarPlusButton.visibility = visibility
+        reconnectCarButton.visibility = visibility
         val params = ctaButton.layoutParams as LinearLayout.LayoutParams
         val topMargin = ((if (visible) 8 else 18) * resources.displayMetrics.density).toInt()
         if (params.topMargin != topMargin) {
